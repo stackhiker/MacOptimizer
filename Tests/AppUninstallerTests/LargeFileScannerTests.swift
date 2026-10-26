@@ -7,7 +7,7 @@ final class LargeFileScannerTests: XCTestCase {
     
     override func setUp() {
         super.setUp()
-        scanner = LargeFileScanner()
+        scanner = LargeFileScanner(deleteFile: { _ in throw POSIXError(.ENOENT) })
     }
     
     override func tearDown() {
@@ -76,7 +76,7 @@ final class LargeFileScannerTests: XCTestCase {
     // MARK: - Property 3: Deletion Removes Files
     // For any set of selected files, after calling deleteItems, those files should no longer appear in the foundFiles list.
     // Feature: large-file-selection-fix, Property 3: Deletion Removes Files
-    func testDeletionRemovesFiles() async {
+    func testDeletionFailurePreservesFiles() async {
         // Create test files
         let testFiles = [
             FileItem(url: URL(fileURLWithPath: "/tmp/delete1.txt"), name: "delete1.txt", size: 100_000_000, type: "txt", accessDate: Date()),
@@ -94,8 +94,8 @@ final class LargeFileScannerTests: XCTestCase {
         let result = await scanner.deleteItems(filesToDelete)
         
         // Verify that deleted files are no longer in foundFiles
-        XCTAssertFalse(scanner.foundFiles.contains(where: { $0.id == testFiles[0].id }), "Deleted file 1 should not be in foundFiles")
-        XCTAssertFalse(scanner.foundFiles.contains(where: { $0.id == testFiles[2].id }), "Deleted file 3 should not be in foundFiles")
+        XCTAssertTrue(scanner.foundFiles.contains(where: { $0.id == testFiles[0].id }), "Failed file 1 must remain visible")
+        XCTAssertTrue(scanner.foundFiles.contains(where: { $0.id == testFiles[2].id }), "Failed file 3 must remain visible")
         
         // Verify that non-deleted file is still in foundFiles
         XCTAssertTrue(scanner.foundFiles.contains(where: { $0.id == testFiles[1].id }), "Non-deleted file should still be in foundFiles")
@@ -109,7 +109,7 @@ final class LargeFileScannerTests: XCTestCase {
     // MARK: - Property 4: Selection Cleared After Deletion
     // For any deletion operation that completes successfully, the selectedFiles set should be empty after the operation.
     // Feature: large-file-selection-fix, Property 4: Selection Cleared After Deletion
-    func testSelectionClearedAfterDeletion() async {
+    func testSelectionPreservedAfterFailedDeletion() async {
         // Create test files
         let testFiles = [
             FileItem(url: URL(fileURLWithPath: "/tmp/clear1.txt"), name: "clear1.txt", size: 100_000_000, type: "txt", accessDate: Date()),
@@ -128,7 +128,7 @@ final class LargeFileScannerTests: XCTestCase {
         let result = await scanner.deleteItems(filesToDelete)
         
         // Verify that selectedFiles is now empty
-        XCTAssertTrue(scanner.selectedFiles.isEmpty, "Selected files should be empty after deletion")
+        XCTAssertEqual(scanner.selectedFiles, filesToDelete, "Failed files should remain selected")
         
         // Verify result structure
         XCTAssertEqual(result.failedCount, 2, "Failed count should be 2 since files don't exist")
@@ -411,16 +411,16 @@ final class LargeFileScannerTests: XCTestCase {
         XCTAssertEqual(result.failedFiles.count, 3, "Failed files list should have 3 entries")
         
         // Step 5: Verify file list updated
-        XCTAssertEqual(scanner.foundFiles.count, 2, "Should have 2 files remaining after deletion")
+        XCTAssertEqual(scanner.foundFiles.count, 5, "Failed and unselected files must remain")
         XCTAssertTrue(scanner.foundFiles.contains(where: { $0.id == testFiles[1].id }), "Archive file should remain")
         XCTAssertTrue(scanner.foundFiles.contains(where: { $0.id == testFiles[3].id }), "Document file should remain")
         
         // Step 6: Verify selections cleared
-        XCTAssertTrue(scanner.selectedFiles.isEmpty, "Selections should be cleared after deletion")
-        XCTAssertEqual(scanner.totalSelectedSize, 0, "Total selected size should be 0 after deletion")
+        XCTAssertEqual(scanner.selectedFiles, filesToDelete)
+        XCTAssertEqual(scanner.totalSelectedSize, expectedSize)
         
         // Step 7: Verify total size updated
-        let remainingSize: Int64 = 500_000_000 + 50_000_000
+        let remainingSize = testFiles.reduce(Int64(0)) { $0 + $1.size }
         XCTAssertEqual(scanner.totalSize, remainingSize, "Total size should reflect remaining files")
     }
     
@@ -453,13 +453,14 @@ final class LargeFileScannerTests: XCTestCase {
         // Verify error handling
         XCTAssertGreaterThan(result.failedCount, 0, "Should have failed deletions for non-existent files")
         XCTAssertGreaterThan(result.errors.count, 0, "Should have error messages")
-        XCTAssertTrue(scanner.selectedFiles.isEmpty, "Selections should be cleared after deletion attempt")
+        XCTAssertFalse(scanner.selectedFiles.isEmpty, "Failed files should remain selected")
         XCTAssertEqual(result.successCount, 0, "Should have no successful deletions")
     }
     
     // MARK: - Integration Test 4: Error Scenarios - Mixed Success and Failure
     // Test handling when some files delete successfully and others fail
     func testErrorScenarioMixedSuccessAndFailure() async {
+        scanner = LargeFileScanner(deleteFile: { try FileManager.default.removeItem(at: $0) })
         // Create a temporary file that will succeed
         let tempDir = FileManager.default.temporaryDirectory
         let successFile = tempDir.appendingPathComponent("will_delete_success.txt")
@@ -494,7 +495,7 @@ final class LargeFileScannerTests: XCTestCase {
             // Verify mixed results
             XCTAssertGreaterThan(result.successCount, 0, "Should have at least one successful deletion")
             XCTAssertGreaterThan(result.failedCount, 0, "Should have at least one failed deletion")
-            XCTAssertTrue(scanner.selectedFiles.isEmpty, "Selections should be cleared after deletion attempt")
+            XCTAssertFalse(scanner.selectedFiles.isEmpty, "Failed files should remain selected")
             XCTAssertEqual(result.failedFiles.count, 1, "Should have 1 failed file")
             
             // Cleanup
@@ -507,6 +508,7 @@ final class LargeFileScannerTests: XCTestCase {
     // MARK: - Integration Test 5: UI Feedback - Successful Deletion
     // Test that UI state is properly updated after successful deletion
     func testUIFeedbackSuccessfulDeletion() async {
+        scanner = LargeFileScanner(deleteFile: { try FileManager.default.removeItem(at: $0) })
         // Create temporary files for successful deletion
         let tempDir = FileManager.default.temporaryDirectory
         let testFile1 = tempDir.appendingPathComponent("delete_success_1.txt")
@@ -568,6 +570,7 @@ final class LargeFileScannerTests: XCTestCase {
     // MARK: - Integration Test 6: Complex Selection and Deletion Workflow
     // Test a complex workflow with multiple selections, deselections, and deletions
     func testComplexSelectionAndDeletionWorkflow() async {
+        scanner = LargeFileScanner(deleteFile: { _ in })
         // Create test files
         let testFiles = [
             FileItem(url: URL(fileURLWithPath: "/tmp/complex1.txt"), name: "complex1.txt", size: 100_000_000, type: "txt", accessDate: Date()),

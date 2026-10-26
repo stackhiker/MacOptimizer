@@ -24,6 +24,12 @@ struct TrashRecord: Codable, Identifiable {
     }
 }
 
+struct DeletionFailureRecord: Codable {
+    let date: Date
+    let category: String
+    let failure: RemovalFailure
+}
+
 // MARK: - 删除日志服务
 /// 记录删除的文件，支持恢复到原位置
 class DeletionLogService: ObservableObject {
@@ -32,19 +38,26 @@ class DeletionLogService: ObservableObject {
     private let fileManager = FileManager.default
     private let logDirectory: URL
     private let dateFormatter: ISO8601DateFormatter
+    private let logLock = NSLock()
+    private let moveToTrash: (URL) throws -> URL?
     
     @Published var deletionRecords: [TrashRecord] = []
     
     // 日志保留天数
     private let retentionDays: Int = 30
     
-    private init() {
+    init(logDirectory: URL? = nil, moveToTrash: @escaping (URL) throws -> URL? = { url in
+        var destination: NSURL?
+        try FileManager.default.trashItem(at: url, resultingItemURL: &destination)
+        return destination as URL?
+    }) {
         // 日志存储目录: ~/Library/Application Support/MacOptimizer/deletion_logs/
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        logDirectory = appSupport.appendingPathComponent("MacOptimizer/deletion_logs")
+        self.logDirectory = logDirectory ?? appSupport.appendingPathComponent("MacOptimizer/deletion_logs")
+        self.moveToTrash = moveToTrash
         
         // 创建目录
-        try? fileManager.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: self.logDirectory, withIntermediateDirectories: true)
         
         dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withFullDate]
@@ -65,6 +78,19 @@ class DeletionLogService: ObservableObject {
     /// - Returns: 删除是否成功
     @discardableResult
     func logAndDelete(at url: URL, category: String = "SmartClean") -> Bool {
+        do {
+            try trashItem(at: url, category: category)
+            return true
+        } catch {
+            logFailure(RemovalFailure(path: url, error: error), category: category)
+            return false
+        }
+    }
+
+    /// Records a successful move and preserves the original error for callers
+    /// that need to report individual failures. Callers record caught failures
+    /// with logFailure, or use the Boolean logAndDelete convenience method.
+    func trashItem(at url: URL, category: String = "SmartClean") throws {
         let originalPath = url.path
         
         // 获取文件大小
@@ -78,35 +104,32 @@ class DeletionLogService: ObservableObject {
         }
         
         // 使用 trashItem 并获取废纸篓中的新路径
-        var trashURL: NSURL?
-        do {
-            try fileManager.trashItem(at: url, resultingItemURL: &trashURL)
-            
-            let trashPath = trashURL?.path
-            
-            // 创建删除记录
-            let record = TrashRecord(
-                originalPath: originalPath,
-                trashPath: trashPath,
-                size: size,
-                category: category
-            )
-            
-            // 添加到内存记录
-            DispatchQueue.main.async {
-                self.deletionRecords.append(record)
-            }
-            
-            // 保存到日志文件
-            saveRecord(record)
-            
-            print("[DeletionLog] ✅ Logged deletion: \(originalPath) -> \(trashPath ?? "unknown")")
-            return true
-            
-        } catch {
-            print("[DeletionLog] ❌ Failed to delete: \(originalPath) - \(error.localizedDescription)")
-            return false
+        let trashURL = try moveToTrash(url)
+
+        let trashPath = trashURL?.path
+
+        // 创建删除记录
+        let record = TrashRecord(
+            originalPath: originalPath,
+            trashPath: trashPath,
+            size: size,
+            category: category
+        )
+
+        // 添加到内存记录
+        DispatchQueue.main.async {
+            self.deletionRecords.append(record)
         }
+
+        // 保存到日志文件
+        saveRecord(record)
+
+        print("[DeletionLog] ✅ Logged deletion: \(originalPath) -> \(trashPath ?? "unknown")")
+    }
+
+    func logFailure(_ failure: RemovalFailure, category: String) {
+        appendRecord(DeletionFailureRecord(date: Date(), category: category, failure: failure), prefix: "failures")
+        print("[DeletionLog] ❌ Failed to delete: \(failure.path.path) - \(failure.message) (\(failure.errorDomain) \(failure.errorCode))")
     }
     
     /// 恢复文件到原位置
@@ -206,13 +229,19 @@ class DeletionLogService: ObservableObject {
     }
     
     private func saveRecord(_ record: TrashRecord) {
+        appendRecord(record, prefix: "deletions")
+    }
+
+    private func appendRecord<T: Codable>(_ record: T, prefix: String) {
+        logLock.lock()
+        defer { logLock.unlock() }
         let dateString = dateFormatter.string(from: Date())
-        let logFile = logDirectory.appendingPathComponent("deletions_\(dateString).json")
+        let logFile = logDirectory.appendingPathComponent("\(prefix)_\(dateString).json")
         
         // 读取现有记录
-        var records: [TrashRecord] = []
+        var records: [T] = []
         if let data = try? Data(contentsOf: logFile),
-           let existingRecords = try? JSONDecoder().decode([TrashRecord].self, from: data) {
+           let existingRecords = try? JSONDecoder().decode([T].self, from: data) {
             records = existingRecords
         }
         
@@ -220,8 +249,11 @@ class DeletionLogService: ObservableObject {
         records.append(record)
         
         // 保存
-        if let data = try? JSONEncoder().encode(records) {
-            try? data.write(to: logFile)
+        do {
+            let data = try JSONEncoder().encode(records)
+            try data.write(to: logFile, options: .atomic)
+        } catch {
+            print("[DeletionLog] ❌ Failed to save log: \(error.localizedDescription)")
         }
     }
     

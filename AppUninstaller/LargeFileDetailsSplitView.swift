@@ -286,7 +286,7 @@ struct LargeFileDetailsSplitView: View {
                             }
                         }
                     } message: {
-                        Text(String(format: loc.text("确定要删除 %d 个文件吗？", "Are you sure you want to delete %d files?"), scanner.selectedFiles.count))
+                        Text(String(format: loc.text("确定要将 %d 个文件移至废纸篓吗？", "Move %d files to Trash?"), scanner.selectedFiles.count))
                     }
                     
                     // Right Side: Hidden balancer

@@ -1002,18 +1002,8 @@ class JunkCleaner: ObservableObject {
             }
         }
         
-        // 如果有失败的项目，尝试使用 sudo 权限删除
-        if !failedItems.isEmpty {
-            let failedPaths = failedItems.map { $0.path.path }
-            let (sudoCleanedSize, sudoSuccess) = await cleanWithAdminPrivileges(paths: failedPaths, items: failedItems)
-            if sudoSuccess {
-                cleanedSize += sudoCleanedSize
-                failedSize -= sudoCleanedSize
-            } else {
-                needsAdmin = true
-            }
-        }
-        
+        needsAdmin = !failedItems.isEmpty
+
         await MainActor.run { [failedItems] in
             self.junkItems.removeAll { item in
                 selectedItems.contains { $0.id == item.id } && !failedItems.contains { $0.id == item.id }
@@ -1090,32 +1080,14 @@ class JunkCleaner: ObservableObject {
                 }
             }
             
-            // 尝试使用管理员权限删除失败的文件
-            let wasStopped = await MainActor.run { self.stopCleaningRequested }
-            if !wasStopped && !categoryFailedItems.isEmpty {
-                let failedPaths = categoryFailedItems.map { $0.path.path }
-                let (sudoCleanedSize, sudoSuccess) = await cleanWithAdminPrivileges(paths: failedPaths, items: categoryFailedItems)
-                if sudoSuccess {
-                    categoryCleanedSize += sudoCleanedSize
-                    totalCleanedSize += sudoCleanedSize
-                    totalFailedSize -= sudoCleanedSize
-                    // 先捕获值以避免 Swift 6 警告
-                    let currentCleanedSize = categoryCleanedSize
-                    await MainActor.run {
-                        self.categoryCleanedSize[category] = currentCleanedSize
-                    }
-                } else {
-                    needsAdmin = true
-                }
-            }
-            
+            needsAdmin = needsAdmin || !categoryFailedItems.isEmpty
+
             // 标记该分类完成
             await MainActor.run {
                 self.categoryCleaningStatus[category] = .completed
             }
             
-            // 稍微延迟以便用户看到进度
-            try? await Task.sleep(nanoseconds: 300_000_000) // 0.3秒
+            await Task.yield()
         }
         
         // 4. 从 junkItems 中移除已清理的项目
@@ -1150,56 +1122,6 @@ class JunkCleaner: ObservableObject {
             print("[JunkCleaner] ⚠️ Failed to delete: \(item.path.lastPathComponent)")
             return false
         }
-    }
-    
-    /// 使用管理员权限清理（通过 AppleScript）
-    private func cleanWithAdminPrivileges(paths: [String], items: [JunkItem]) async -> (Int64, Bool) {
-        var cleanedSize: Int64 = 0
-        var safePaths: [String] = []
-        
-        // 1. 安全检查
-        for path in paths {
-            if SafetyGuard.shared.isSafeToDelete(URL(fileURLWithPath: path)) {
-                safePaths.append(path)
-            } else {
-                print("[JunkCleaner] 🛡️ Skipped unsafe path in privileged clean: \(path)")
-            }
-        }
-        
-        if safePaths.isEmpty {
-            return (0, false)
-        }
-        
-        // 2. 构建删除命令
-        // 使用 rm -rf 
-        let escapedPaths = safePaths.map { path in
-            path.replacingOccurrences(of: "'", with: "'\\''")
-        }
-        
-        let rmCommands = escapedPaths.map { "rm -rf '\($0)'" }.joined(separator: " && ")
-        
-        let script = """
-        do shell script "\(rmCommands)" with administrator privileges
-        """
-        
-        var error: NSDictionary?
-        if let appleScript = NSAppleScript(source: script) {
-            appleScript.executeAndReturnError(&error)
-            
-            if error == nil {
-                // 成功，计算清理的大小
-                for path in safePaths {
-                    if let item = items.first(where: { $0.path.path == path }) {
-                        cleanedSize += item.size
-                    }
-                }
-                return (cleanedSize, true)
-            } else {
-                 print("[JunkCleaner] AppleScript error: \(String(describing: error))")
-            }
-        }
-        
-        return (0, false)
     }
     
     private func scanType(_ type: JunkType) async -> [JunkItem] {

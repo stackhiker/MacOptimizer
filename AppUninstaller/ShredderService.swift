@@ -62,14 +62,17 @@ class ShredderService: ObservableObject {
     }
     
     func removeItem(id: UUID) {
+        guard !isProcessing else { return }
         items.removeAll { $0.id == id }
     }
 
     func removeItems(at offsets: IndexSet) {
+        guard !isProcessing else { return }
         items.remove(atOffsets: offsets)
     }
     
     func reset() {
+        guard !isProcessing else { stopShredding(); return }
         items = []
         isProcessing = false
         progress = 0.0
@@ -82,25 +85,29 @@ class ShredderService: ObservableObject {
     
     // MARK: - Shredding Logic
     func startShredding() async {
-        await MainActor.run {
+        let canStart = await MainActor.run { () -> Bool in
+            guard !isProcessing else { return false }
             isProcessing = true
             isStopping = false
             stopRequested = false
             progress = 0.0
             totalSizeCleared = 0
+            return true
         }
-        
-        let totalItems = items.count
+        guard canStart else { return }
+        let snapshot = await MainActor.run { items }
+        let totalItems = snapshot.count
         var processedCount = 0
         
-        for index in items.indices {
-            if stopRequested { break }
-
-            let item = items[index]
+        for item in snapshot {
+            let stopped = await MainActor.run { stopRequested }
+            if Task.isCancelled || stopped { break }
             
             await MainActor.run {
                 currentItemName = item.name
-                items[index].status = "Shredding..."
+                if let index = items.firstIndex(where: { $0.id == item.id }) {
+                    items[index].status = "Shredding..."
+                }
             }
             
             // Perform Secure Delete
@@ -108,6 +115,7 @@ class ShredderService: ObservableObject {
             
             processedCount += 1
             await MainActor.run { [processedCount] in
+                guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
                 if success {
                     items[index].status = "Done"
                     totalSizeCleared += item.size
@@ -137,90 +145,17 @@ class ShredderService: ObservableObject {
     }
     
     private func secureDelete(url: URL) async -> Bool {
-        // Check if file exists
-        guard FileManager.default.fileExists(atPath: url.path) else { return true }
-        
-        // 1. Check for locks/running processes (Simulated for now, can add lsof later if needed)
-        // In a real implementation, we'd use `lsof` to find PID and offer to kill it.
-        
-        do {
-            // Get file attributes
-            let attr = try FileManager.default.attributesOfItem(atPath: url.path)
-            let isDir = (attr[.type] as? FileAttributeType) == .typeDirectory
-            
-            if isDir {
-                // If directory, standard enumerate and delete contents first
-                // For secure delete of directory, we should recurse.
-                // For simplicity in this iteration, we use standard removal for directories
-                // or just remove it. A strict shredder would shred every file inside.
-                // Let's attempt to shred contents.
-                if let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil) {
-                    while let fileURL = enumerator.nextObject() as? URL {
-                        _ = try? await simpleOverwrite(url: fileURL)
-                    }
-                }
-                try FileManager.default.removeItem(at: url)
-            } else {
-                // 2. Overwrite Logic (1-pass zero fill)
-                // This makes recovery much harder than simple delete.
-                try await simpleOverwrite(url: url)
-                
-                // 3. Rename (Obfuscate name)
-                let newName = UUID().uuidString
-                let newUrl = url.deletingLastPathComponent().appendingPathComponent(newName)
-                try FileManager.default.moveItem(at: url, to: newUrl)
-                
-                // 4. Remove
-                try FileManager.default.removeItem(at: newUrl)
+        await Task.detached(priority: .userInitiated) {
+            do {
+                try SecureFileShredder.shred(at: url)
+                return true
+            } catch {
+                print("Shred error: \(error)")
+                return false
             }
-            
-            return true
-        } catch {
-            print("Shred error: \(error)")
-            return false
-        }
+        }.value
     }
-    
-    private func simpleOverwrite(url: URL) async throws {
-        // Only overwrite files, not directories
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-           return
-        }
-        
-        let handle = try FileHandle(forWritingTo: url)
-        let size = handle.seekToEndOfFile()
-        
-        // If file is huge, maybe don't overwrite entire thing for performance in this demo?
-        // Let's overwrite first 1MB and last 1MB and random chunks if > 10MB
-        // But user asked for "Real" functionality. A real shredder overwrites everything.
-        // We will overwrite up to 10MB to avoid hanging UI on massive movies,
-        // or chunk it. For "Real" result, we should try to be thorough but efficient.
-        // Let's allow full overwrite but maybe async? We are already in async.
-        
-        try handle.seek(toOffset: 0)
-        
-        // Chunk size 1MB
-        let chunkSize = 1024 * 1024
-        let zeroData = Data(count: chunkSize)
-        
-        var written: UInt64 = 0
-        while written < size {
-            let remaining = size - written
-            let toWrite = min(UInt64(chunkSize), remaining)
-            if toWrite < chunkSize {
-                 try handle.write(contentsOf: Data(count: Int(toWrite)))
-            } else {
-                 try handle.write(contentsOf: zeroData)
-            }
-            written += toWrite
-            // Periodic yield
-            try await Task.sleep(nanoseconds: 1_000_000) 
-        }
-        
-        try handle.close()
-    }
-    
+
     private func calculateSize(of url: URL) -> Int64 {
         var size: Int64 = 0
         let resourceKeys: Set<URLResourceKey> = [

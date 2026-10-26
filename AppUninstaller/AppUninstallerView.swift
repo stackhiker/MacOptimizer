@@ -508,9 +508,7 @@ struct AppUninstallerView: View {
             }
             
             // 从列表中移除已卸载的应用
-            if result.failedCount == 0 || (result.successCount > 0 && result.failedPaths.first?.path != app.path.path) {
-                await appScanner.removeFromList(app: app)
-            }
+            appScanner.applyRemovalResult(result, to: app)
         }
         
         await MainActor.run {
@@ -573,14 +571,15 @@ struct AppUninstallerView: View {
         let result = await fileRemover.removeApp(app, includeApp: includeApp, moveToTrash: moveToTrash)
         
         await MainActor.run {
+            uninstallResults = [result]
             totalSuccessCount = result.successCount
             totalFailedCount = result.failedCount
             totalRemovedSize = result.totalSizeRemoved
         }
         
         // 从列表中移除已卸载的应用（仅当应用本体也被删除时）
-        if includeApp && (result.failedCount == 0 || result.failedPaths.first?.path != app.path.path) {
-            await appScanner.removeFromList(app: app)
+        appScanner.applyRemovalResult(result, to: app)
+        if result.appRemoved {
             await MainActor.run {
                 detailedApp = nil // 返回列表视图
             }

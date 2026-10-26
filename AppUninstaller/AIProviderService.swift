@@ -53,7 +53,8 @@ struct AIAttachmentPayload {
 
 private struct AIProviderStoredConfiguration: Codable {
     var baseURL: String
-    var apiKey: String
+    // Decoded only to migrate older files. New files never contain a key.
+    var apiKey: String?
     var model: String
 }
 
@@ -62,31 +63,41 @@ private struct AIProviderSettingsFile: Codable {
     var providers: [String: AIProviderStoredConfiguration]
 }
 
+protocol AISecretStore {
+    func read(account: String) throws -> String?
+    func write(_ value: String, account: String) throws
+}
+
 final class AIProviderSettingsStore: ObservableObject {
     static let shared = AIProviderSettingsStore()
 
     @Published var activeProvider: AIProvider {
         didSet {
             storedSettings.activeProvider = activeProvider
-            try? write(storedSettings)
+            do { try persist(storedSettings); credentialStorageFailed = false }
+            catch { credentialStorageFailed = true }
         }
     }
+    @Published private(set) var credentialStorageFailed = false
 
     private static let activeProviderKey = "ai_active_provider"
     private let settingsURL: URL
+    private let secrets: AISecretStore
     private var storedSettings: AIProviderSettingsFile
 
-    private init(defaults: UserDefaults = .standard) {
-        self.settingsURL = Self.makeSettingsURL()
-        if let existing = Self.readSettings(from: settingsURL) {
-            self.storedSettings = existing
-        } else {
-            self.storedSettings = Self.legacySettings(defaults: defaults)
-            if (try? Self.write(storedSettings, to: settingsURL)) != nil {
-                Self.removeLegacySettings(defaults: defaults)
-            }
-        }
+    init(settingsURL: URL? = nil, defaults: UserDefaults = .standard, secrets: AISecretStore? = nil) {
+        self.settingsURL = settingsURL ?? Self.makeSettingsURL()
+        self.secrets = secrets ?? AIKeychainStore()
+        self.storedSettings = Self.readSettings(from: self.settingsURL) ?? Self.legacySettings(defaults: defaults)
         self.activeProvider = storedSettings.activeProvider
+        do {
+            // Preserve the old file if any Keychain write fails, so migration can
+            // be retried without losing credentials. Existing Keychain keys stay.
+            try persist(storedSettings)
+            Self.removeLegacySettings(defaults: defaults)
+        } catch {
+            credentialStorageFailed = true
+        }
     }
 
     func configuration(for provider: AIProvider? = nil) -> AIProviderConfiguration {
@@ -95,26 +106,32 @@ final class AIProviderSettingsStore: ObservableObject {
         return AIProviderConfiguration(
             provider: provider,
             baseURL: stored?.baseURL ?? provider.defaultBaseURL,
-            apiKey: stored?.apiKey ?? "",
+            apiKey: (try? secrets.read(account: Self.account(provider))) ?? stored?.apiKey ?? "",
             model: stored?.model ?? provider.defaultModel
         )
     }
 
     func save(provider: AIProvider, baseURL: String, apiKey: String, model: String) throws {
-        let normalizedBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-
+        // Finish a pending migration before replacing any provider's key.
+        try persist(storedSettings)
+        let account = Self.account(provider)
+        let previous = try secrets.read(account: account) ?? ""
+        try secrets.write(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), account: account)
         var updated = storedSettings
         updated.activeProvider = provider
         updated.providers[provider.rawValue] = .init(
-            baseURL: normalizedBaseURL,
-            apiKey: normalizedAPIKey,
-            model: normalizedModel
+            baseURL: baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            apiKey: nil,
+            model: model.trimmingCharacters(in: .whitespacesAndNewlines)
         )
-        try write(updated)
-        storedSettings = updated
+        do {
+            try persist(updated)
+        } catch {
+            try? secrets.write(previous, account: account)
+            throw error
+        }
         activeProvider = provider
+        credentialStorageFailed = false
         objectWillChange.send()
     }
 
@@ -124,15 +141,24 @@ final class AIProviderSettingsStore: ObservableObject {
 
     var storagePath: String { settingsURL.path }
 
-    private func write(_ settings: AIProviderSettingsFile) throws {
-        try Self.write(settings, to: settingsURL)
+    private static func account(_ provider: AIProvider) -> String { "ai.\(provider.rawValue).api-key" }
+
+    private func persist(_ settings: AIProviderSettingsFile) throws {
+        var sanitized = settings
+        for provider in AIProvider.allCases {
+            if let legacyKey = sanitized.providers[provider.rawValue]?.apiKey, !legacyKey.isEmpty {
+                try secrets.write(legacyKey, account: Self.account(provider))
+            }
+            sanitized.providers[provider.rawValue]?.apiKey = nil
+        }
+        try Self.write(sanitized, to: settingsURL)
+        storedSettings = sanitized
     }
 
     private static func makeSettingsURL() -> URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
-        return support
-            .appendingPathComponent("Mac优化大师", isDirectory: true)
+        return support.appendingPathComponent("Mac优化大师", isDirectory: true)
             .appendingPathComponent("ai-provider-settings.json", isDirectory: false)
     }
 
@@ -148,19 +174,16 @@ final class AIProviderSettingsStore: ObservableObject {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
             try encoder.encode(settings).write(to: url, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } catch {
-            throw AIProviderError.fileStorage
-        }
+        } catch { throw AIProviderError.fileStorage }
     }
 
     private static func legacySettings(defaults: UserDefaults) -> AIProviderSettingsFile {
-        let keychain = AIKeychainStore()
         let active = AIProvider(rawValue: defaults.string(forKey: activeProviderKey) ?? "") ?? .openAI
         var providers: [String: AIProviderStoredConfiguration] = [:]
         for provider in AIProvider.allCases {
             providers[provider.rawValue] = .init(
                 baseURL: defaults.string(forKey: "ai_\(provider.rawValue)_base_url") ?? provider.defaultBaseURL,
-                apiKey: keychain.read(account: "ai.\(provider.rawValue).api-key") ?? "",
+                apiKey: nil,
                 model: defaults.string(forKey: "ai_\(provider.rawValue)_model") ?? provider.defaultModel
             )
         }
@@ -168,42 +191,53 @@ final class AIProviderSettingsStore: ObservableObject {
     }
 
     private static func removeLegacySettings(defaults: UserDefaults) {
-        let keychain = AIKeychainStore()
         defaults.removeObject(forKey: activeProviderKey)
         for provider in AIProvider.allCases {
             defaults.removeObject(forKey: "ai_\(provider.rawValue)_base_url")
             defaults.removeObject(forKey: "ai_\(provider.rawValue)_model")
-            keychain.delete(account: "ai.\(provider.rawValue).api-key")
         }
     }
 }
 
-private struct AIKeychainStore {
+private struct AIKeychainStore: AISecretStore {
     private let service = Bundle.main.bundleIdentifier ?? "com.macoptimizer.ai"
 
-    func read(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
+    private func query(_ account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service, kSecAttrAccount as String: account]
+    }
 
+    func read(account: String) throws -> String? {
+        var lookup = query(account)
+        lookup[kSecReturnData as String] = true
+        lookup[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
+        let status = SecItemCopyMatching(lookup as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw AIProviderError.credentialStorage(status)
+        }
         return String(data: data, encoding: .utf8)
     }
 
-    func delete(account: String) {
-        let lookup: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-
-        SecItemDelete(lookup as CFDictionary)
+    func write(_ value: String, account: String) throws {
+        let lookup = query(account)
+        if value.isEmpty {
+            let status = SecItemDelete(lookup as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw AIProviderError.credentialStorage(status)
+            }
+            return
+        }
+        let data = Data(value.utf8)
+        var status = SecItemUpdate(lookup as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = lookup
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else { throw AIProviderError.credentialStorage(status) }
     }
 }
 
@@ -213,6 +247,7 @@ enum AIProviderError: Error {
     case httpStatus(Int)
     case emptyResponse
     case fileStorage
+    case credentialStorage(OSStatus)
 }
 
 struct AIProviderClient {

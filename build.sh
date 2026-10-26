@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 应用卸载器 - 构建脚本
-# 构建 Universal Binary (Intel + Apple Silicon) 并打包 DMG
+# 构建 Apple Silicon 应用并打包 DMG；双架构使用 build_dual_dmg.sh
 
 set -e
 

@@ -119,6 +119,7 @@ struct SmartCleanerReplicaView: View {
             Button(localized("运行", "Run"), role: .destructive) {
                 Task {
                     let result = await service.cleanAll()
+                    guard !service.cleaningWasStopped else { return }
                     if result.failed > 0 && !result.failedFiles.isEmpty {
                         failedFiles = result.failedFiles
                         showAdminRetry = true
@@ -144,14 +145,15 @@ struct SmartCleanerReplicaView: View {
             Text(runningAppsMessage(names))
         }
         .alert(
-            localized("部分文件需要管理员权限", "Some Files Require Admin Privileges"),
+            localized("部分文件未能移至废纸篓", "Some Files Could Not Be Moved to Trash"),
             isPresented: $showAdminRetry
         ) {
-            Button(localized("使用管理员权限删除", "Delete with Admin"), role: .destructive) {
+            Button(localized("重试移至废纸篓", "Retry Moving to Trash"), role: .destructive) {
                 Task {
-                    _ = await service.cleanWithPrivileges(files: failedFiles)
-                    failedFiles = []
-                    cleaningFinished = true
+                    let result = await service.retryFailedFiles(failedFiles)
+                    guard !service.cleaningWasStopped else { return }
+                    if result.failed == 0 { failedFiles = [] }
+                    cleaningFinished = result.failed == 0
                 }
             }
             Button(localized("完成", "Done"), role: .cancel) {

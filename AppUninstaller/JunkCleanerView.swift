@@ -97,8 +97,8 @@ struct JunkCleanerView: View {
                 }
             }
         )
-        .alert(loc.text("部分文件需要管理员权限", "Some Files Require Admin Privileges"), isPresented: $showRetryWithAdmin) {
-            Button(loc.text("使用管理员权限删除", "Delete with Admin"), role: .destructive) {
+        .alert(loc.text("部分文件未能移至废纸篓", "Some Files Could Not Be Moved to Trash"), isPresented: $showRetryWithAdmin) {
+            Button(loc.text("完成", "Done"), role: .destructive) {
                  showCleaningFinished = true
             }
             Button(loc.L("cancel"), role: .cancel) {

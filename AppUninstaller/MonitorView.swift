@@ -5,7 +5,8 @@ import AppKit
 struct MonitorView: View {
     @State private var viewState: DashboardState = .dashboard
     @State private var processSortMode: ConsoleProcessSortMode = .memory
-    @StateObject private var systemMonitor = SystemMonitorService()
+    @ObservedObject private var systemMonitor = SystemMonitorService.shared
+    @State private var monitorClientID = UUID().uuidString
     @ObservedObject var loc = LocalizationManager.shared
     
     enum DashboardState {
@@ -54,10 +55,10 @@ struct MonitorView: View {
             .background(Color.clear) // Gradient is in main window
         }
         .onAppear {
-            systemMonitor.startMonitoring()
+            systemMonitor.startMonitoring(client: monitorClientID)
         }
         .onDisappear {
-            systemMonitor.stopMonitoring()
+            systemMonitor.stopMonitoring(client: monitorClientID)
         }
     }
 }
@@ -67,7 +68,8 @@ struct ConsoleDashboardView: View {
     @Binding var viewState: MonitorView.DashboardState
     @ObservedObject var loc = LocalizationManager.shared
     @ObservedObject var scanManager = ScanServiceManager.shared
-    @StateObject private var systemService = SystemMonitorService()
+    @ObservedObject private var systemService = SystemMonitorService.shared
+    @State private var monitorClientID = UUID().uuidString
     
     var body: some View {
         VStack(spacing: 0) {
@@ -229,7 +231,7 @@ struct ConsoleDashboardView: View {
             }
         }
         .onAppear {
-            systemService.startMonitoring()
+            systemService.startMonitoring(client: monitorClientID)
             // 确保 junk size 是最新的
             if !scanManager.isAnyScanning && scanManager.totalCleanableSize == 0 {
                 Task {
@@ -240,7 +242,7 @@ struct ConsoleDashboardView: View {
             }
         }
         .onDisappear {
-            systemService.stopMonitoring()
+            systemService.stopMonitoring(client: monitorClientID)
         }
     }
 }
@@ -1013,6 +1015,7 @@ struct ConsoleJunkCleanView: View {
 ), role: .destructive) {
                 Task {
                     let result = await service.cleanAll()
+                    guard !service.cleaningWasStopped else { return }
                     deleteResult = (result.success, result.failed, result.size)
                     failedFiles = result.failedFiles
                     
@@ -1027,10 +1030,11 @@ struct ConsoleJunkCleanView: View {
         } message: {
             Text(loc.text("将清理所有选中的垃圾文件，释放空间。", "Clean all selected files to free up space."))
         }
-        .alert(loc.text("部分文件需要管理员权限", "Some Files Require Admin Privileges"), isPresented: $showRetryWithAdmin) {
-            Button(loc.text("使用管理员权限删除", "Delete with Admin"), role: .destructive) {
+        .alert(loc.text("部分文件未能移至废纸篓", "Some Files Could Not Be Moved to Trash"), isPresented: $showRetryWithAdmin) {
+            Button(loc.text("重试移至废纸篓", "Retry Moving to Trash"), role: .destructive) {
                 Task {
-                    let adminResult = await service.cleanWithPrivileges(files: failedFiles)
+                    let adminResult = await service.retryFailedFiles(failedFiles)
+                    guard !service.cleaningWasStopped else { return }
                     if let currentResult = deleteResult {
                         deleteResult = (
                             currentResult.success + adminResult.success,

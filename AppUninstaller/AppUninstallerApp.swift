@@ -8,7 +8,7 @@ struct AppUninstallerApp: App {
     @StateObject private var localization = LocalizationManager.shared
     
     var body: some Scene {
-        WindowGroup {
+        Window(localization.currentLanguage.productName, id: "main") {
             Group {
                 if localization.hasSelectedLanguage {
                     ContentView()

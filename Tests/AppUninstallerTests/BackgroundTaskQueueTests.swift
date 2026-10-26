@@ -21,12 +21,12 @@ final class BackgroundTaskQueueTests: XCTestCase {
     // Feature: performance-optimization, Property 3: Sequential Task Execution
     // Validates: Requirements 1.4
     
-    func testTasksExecuteSequentially() async {
+    func testTasksExecuteSequentially() async throws {
         var executionOrder: [Int] = []
         
         // Enqueue multiple tasks
         for i in 0..<5 {
-            _ = await queue.enqueue {
+            _ = try await queue.enqueue {
                 executionOrder.append(i)
                 // Simulate some work
                 try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
@@ -37,13 +37,13 @@ final class BackgroundTaskQueueTests: XCTestCase {
         XCTAssertEqual(executionOrder, [0, 1, 2, 3, 4], "Tasks should execute in sequential order")
     }
     
-    func testNoTasksExecuteConcurrently() async {
+    func testNoTasksExecuteConcurrently() async throws {
         var concurrentCount = 0
         var maxConcurrentCount = 0
         
         // Enqueue tasks that track concurrent execution
         for _ in 0..<10 {
-            _ = await queue.enqueue {
+            _ = try await queue.enqueue {
                 concurrentCount += 1
                 if concurrentCount > maxConcurrentCount {
                     maxConcurrentCount = concurrentCount
@@ -62,29 +62,29 @@ final class BackgroundTaskQueueTests: XCTestCase {
     
     // MARK: - Unit Tests
     
-    func testEnqueueAndExecuteSimpleTask() async {
+    func testEnqueueAndExecuteSimpleTask() async throws {
         var executed = false
         
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             executed = true
         }
         
         XCTAssertTrue(executed, "Task should be executed")
     }
     
-    func testEnqueueTaskWithReturnValue() async {
-        let result = await queue.enqueue {
+    func testEnqueueTaskWithReturnValue() async throws {
+        let result = try await queue.enqueue {
             return 42
         }
         
         XCTAssertEqual(result, 42, "Task should return correct value")
     }
     
-    func testEnqueueMultipleTasks() async {
+    func testEnqueueMultipleTasks() async throws {
         var counter = 0
         
         for _ in 0..<5 {
-            _ = await queue.enqueue {
+            _ = try await queue.enqueue {
                 counter += 1
             }
         }
@@ -92,22 +92,22 @@ final class BackgroundTaskQueueTests: XCTestCase {
         XCTAssertEqual(counter, 5, "All tasks should be executed")
     }
     
-    func testTasksReturnCorrectValues() async {
-        let result1 = await queue.enqueue { return "first" }
-        let result2 = await queue.enqueue { return "second" }
-        let result3 = await queue.enqueue { return "third" }
+    func testTasksReturnCorrectValues() async throws {
+        let result1 = try await queue.enqueue { return "first" }
+        let result2 = try await queue.enqueue { return "second" }
+        let result3 = try await queue.enqueue { return "third" }
         
         XCTAssertEqual(result1, "first", "First task should return correct value")
         XCTAssertEqual(result2, "second", "Second task should return correct value")
         XCTAssertEqual(result3, "third", "Third task should return correct value")
     }
     
-    func testCancelAllRemovesPendingTasks() async {
+    func testCompletedTasksAreUnaffectedByCancelAll() async throws {
         var executedCount = 0
         
         // Enqueue multiple tasks
         for _ in 0..<5 {
-            _ = await queue.enqueue {
+            _ = try await queue.enqueue {
                 executedCount += 1
             }
         }
@@ -119,11 +119,11 @@ final class BackgroundTaskQueueTests: XCTestCase {
         XCTAssertEqual(executedCount, 5, "All enqueued tasks should execute before cancel")
     }
     
-    func testQueueHandlesAsyncOperations() async {
+    func testQueueHandlesAsyncOperations() async throws {
         var results: [String] = []
         
         for i in 0..<3 {
-            _ = await queue.enqueue {
+            _ = try await queue.enqueue {
                 // Simulate async operation
                 try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
                 results.append("task\(i)")
@@ -134,11 +134,11 @@ final class BackgroundTaskQueueTests: XCTestCase {
         XCTAssertEqual(results, ["task0", "task1", "task2"], "Tasks should complete in order")
     }
     
-    func testQueueWithDifferentReturnTypes() async {
-        let intResult = await queue.enqueue { return 123 }
-        let stringResult = await queue.enqueue { return "hello" }
-        let boolResult = await queue.enqueue { return true }
-        let arrayResult = await queue.enqueue { return [1, 2, 3] }
+    func testQueueWithDifferentReturnTypes() async throws {
+        let intResult = try await queue.enqueue { return 123 }
+        let stringResult = try await queue.enqueue { return "hello" }
+        let boolResult = try await queue.enqueue { return true }
+        let arrayResult = try await queue.enqueue { return [1, 2, 3] }
         
         XCTAssertEqual(intResult, 123, "Should return Int correctly")
         XCTAssertEqual(stringResult, "hello", "Should return String correctly")
@@ -146,12 +146,12 @@ final class BackgroundTaskQueueTests: XCTestCase {
         XCTAssertEqual(arrayResult, [1, 2, 3], "Should return Array correctly")
     }
     
-    func testQueuePreventsConcurrentModification() async {
+    func testQueuePreventsConcurrentModification() async throws {
         var sharedArray: [Int] = []
         
         // Enqueue tasks that modify shared state
         for i in 0..<10 {
-            _ = await queue.enqueue {
+            _ = try await queue.enqueue {
                 sharedArray.append(i)
                 // Simulate work
                 try? await Task.sleep(nanoseconds: 1_000_000) // 1ms
@@ -163,11 +163,11 @@ final class BackgroundTaskQueueTests: XCTestCase {
         XCTAssertEqual(sharedArray, Array(0..<10), "Modifications should be in order")
     }
     
-    func testQueueWithLongRunningTasks() async {
+    func testQueueWithLongRunningTasks() async throws {
         var completionOrder: [Int] = []
         
         for i in 0..<3 {
-            _ = await queue.enqueue {
+            _ = try await queue.enqueue {
                 // Simulate long-running task
                 try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
                 completionOrder.append(i)
@@ -179,52 +179,52 @@ final class BackgroundTaskQueueTests: XCTestCase {
     
     // MARK: - Integration Tests
     
-    func testCompleteQueueWorkflow() async {
+    func testCompleteQueueWorkflow() async throws {
         var log: [String] = []
         
         // Simulate a realistic workflow
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             log.append("start")
         }
         
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
             log.append("process")
         }
         
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             log.append("complete")
         }
         
         XCTAssertEqual(log, ["start", "process", "complete"], "Workflow should execute in correct order")
     }
     
-    func testQueueWithMixedTaskTypes() async {
+    func testQueueWithMixedTaskTypes() async throws {
         var results: [String] = []
         
         // Mix of different task types
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             results.append("sync")
         }
         
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             try? await Task.sleep(nanoseconds: 5_000_000) // 5ms
             results.append("async")
         }
         
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             results.append("final")
         }
         
         XCTAssertEqual(results, ["sync", "async", "final"], "Mixed task types should execute sequentially")
     }
     
-    func testQueueStressTest() async {
+    func testQueueStressTest() async throws {
         var counter = 0
         let taskCount = 100
         
         for _ in 0..<taskCount {
-            _ = await queue.enqueue {
+            _ = try await queue.enqueue {
                 counter += 1
             }
         }
@@ -232,16 +232,16 @@ final class BackgroundTaskQueueTests: XCTestCase {
         XCTAssertEqual(counter, taskCount, "All tasks in stress test should execute")
     }
     
-    func testQueueWithNestedTasks() async {
+    func testQueueWithNestedTasks() async throws {
         var executionLog: [String] = []
         
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             executionLog.append("outer1")
             // Simulate nested async work
             try? await Task.sleep(nanoseconds: 5_000_000) // 5ms
         }
         
-        _ = await queue.enqueue {
+        _ = try await queue.enqueue {
             executionLog.append("outer2")
         }
         

@@ -5,7 +5,7 @@ let package = Package(
     name: "MacOptimizer",
     defaultLocalization: "en",
     platforms: [
-        .macOS(.v12)
+        .macOS(.v13)
     ],
     products: [
         .executable(name: "AppUninstaller", targets: ["AppUninstaller"])

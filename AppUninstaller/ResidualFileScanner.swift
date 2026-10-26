@@ -3,9 +3,17 @@ import Foundation
 // MARK: - 残留文件扫描服务
 class ResidualFileScanner {
     private let fileManager = FileManager.default
-    private let homeDirectory = URL(fileURLWithPath: NSHomeDirectory())
+    private let homeDirectory: URL
+
+    init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        self.homeDirectory = homeDirectory
+    }
     private let scanCache = CacheManager<String, [ResidualFile]>(maxSizeBytes: 50 * 1024 * 1024) // 50MB cache
     private let taskQueue = BackgroundTaskQueue()
+
+    func invalidateCache(for app: InstalledApp) {
+        scanCache.invalidate(app.bundleIdentifier ?? app.name)
+    }
     
     /// 扫描应用的所有残留文件
     func scanResidualFiles(for app: InstalledApp) async -> [ResidualFile] {
@@ -17,7 +25,7 @@ class ResidualFileScanner {
         }
         
         // Perform scan on background thread
-        let residualFiles = await taskQueue.enqueue { [weak self] in
+        let residualFiles: [ResidualFile] = (try? await taskQueue.enqueue { [weak self] in
             guard let self = self else { return [ResidualFile]() }
             
             var residualFiles: [ResidualFile] = []
@@ -44,7 +52,7 @@ class ResidualFileScanner {
                 seenPaths.insert($0.path.standardizedFileURL.path).inserted &&
                 ScanResultIgnoreStore.shouldInclude($0.path)
             }
-        }
+        }) ?? []
         
         // Cache the results
         scanCache.set(cacheKey, value: residualFiles, ttl: 300)
@@ -290,8 +298,8 @@ class ResidualFileScanner {
         switch bundleId {
         case "com.google.chrome":
             paths = [
-                (homeDirectory.appendingPathComponent("Library/Application Support/Google"), .applicationSupport),
-                (homeDirectory.appendingPathComponent("Library/Caches/Google"), .caches),
+                (homeDirectory.appendingPathComponent("Library/Application Support/Google/Chrome"), .applicationSupport),
+                (homeDirectory.appendingPathComponent("Library/Caches/Google/Chrome"), .caches),
                 (homeDirectory.appendingPathComponent("Library/HTTPStorages/com.google.Chrome"), .caches)
             ]
         case "com.openai.codex":

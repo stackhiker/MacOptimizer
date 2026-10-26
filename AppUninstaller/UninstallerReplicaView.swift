@@ -26,6 +26,8 @@ struct UninstallerReplicaView: View {
     @State private var showRemoveConfirmation = false
     @State private var showResult = false
     @State private var resultMessage = ""
+    @State private var resultFailures: [RemovalFailure] = []
+    @State private var showFailureDetails = false
     @State private var orbHovered = false
 
     private let fileRemover = FileRemover()
@@ -72,9 +74,36 @@ struct UninstallerReplicaView: View {
             Text(confirmationMessage)
         }
         .alert(localized("操作完成", "Operation Complete"), isPresented: $showResult) {
+            if !resultFailures.isEmpty {
+                Button(localized("查看失败详情", "View Failure Details")) { showFailureDetails = true }
+            }
             Button(localized("确定", "OK")) {}
         } message: {
             Text(resultMessage)
+        }
+        .sheet(isPresented: $showFailureDetails) {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Text(localized("未能移除的项目", "Items That Could Not Be Removed"))
+                        .font(.headline)
+                    Spacer()
+                    Button(localized("完成", "Done")) { showFailureDetails = false }
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(Array(resultFailures.enumerated()), id: \.offset) { _, failure in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(failure.path.path).font(.system(.body, design: .monospaced))
+                                Text(failure.message).foregroundColor(.secondary)
+                            }
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            .padding(24)
+            .frame(width: 640, height: 440)
         }
         .overlay {
             if isRemoving {
@@ -556,13 +585,21 @@ struct UninstallerReplicaView: View {
     @MainActor
     private func removeSelection() async {
         isRemoving = true
+        resultFailures = []
         if category == .leftovers {
             let targets = leftovers.filter { selectedLeftoverIDs.contains($0.id) }
             var success = 0
             var failed = 0
             for item in targets {
-                if DeletionLogService.shared.logAndDelete(at: item.url, category: "UninstallerLeftovers") { success += 1 }
-                else { failed += 1 }
+                do {
+                    try DeletionLogService.shared.trashItem(at: item.url, category: "UninstallerLeftovers")
+                    success += 1
+                } catch {
+                    let failure = RemovalFailure(path: item.url, error: error)
+                    DeletionLogService.shared.logFailure(failure, category: "UninstallerLeftovers")
+                    resultFailures.append(failure)
+                    failed += 1
+                }
             }
             leftovers.removeAll { selectedLeftoverIDs.contains($0.id) && !FileManager.default.fileExists(atPath: $0.url.path) }
             selectedLeftoverIDs = selectedLeftoverIDs.filter { id in leftovers.contains(where: { $0.id == id }) }
@@ -571,18 +608,24 @@ struct UninstallerReplicaView: View {
             let targets = appScanner.apps.filter { selectedAppIDs.contains($0.id) }
             var success = 0
             var failed = 0
+            var failedResiduals = 0
             for app in targets {
                 await appScanner.scanResidualFiles(for: app)
                 let result = await fileRemover.removeApp(app, includeApp: true, moveToTrash: true)
-                if result.failedCount == 0 {
+                appScanner.applyRemovalResult(result, to: app)
+                resultFailures.append(contentsOf: result.failures)
+                failedResiduals += result.failedPaths.filter { $0.standardizedFileURL != app.path.standardizedFileURL }.count
+                if result.appRemoved {
                     success += 1
                     selectedAppIDs.remove(app.id)
-                    await appScanner.removeFromList(app: app)
                 } else {
                     failed += 1
                 }
             }
-            resultMessage = localized("已卸载 \(success) 个应用程序\(failed > 0 ? "，\(failed) 个失败并已保留" : "")。", "Uninstalled \(success) apps\(failed > 0 ? "; \(failed) failed and remain listed" : "").")
+            resultMessage = localized("已卸载 \(success) 个应用程序\(failed > 0 ? "，\(failed) 个应用本体未能移除" : "")。", "Uninstalled \(success) apps\(failed > 0 ? "; \(failed) app bundles could not be removed" : "").")
+            if failedResiduals > 0 {
+                resultMessage += localized("\n另有 \(failedResiduals) 个残留项目未能移除。", "\n\(failedResiduals) residual items could not be removed.")
+            }
         }
         isRemoving = false
         showResult = true
@@ -593,14 +636,25 @@ struct UninstallerReplicaView: View {
         isRemoving = true
         if app.residualFiles.isEmpty { await appScanner.scanResidualFiles(for: app) }
         let result = await fileRemover.removeApp(app, includeApp: includeApp, moveToTrash: moveToTrash)
-        if result.failedCount == 0 && includeApp {
-            await appScanner.removeFromList(app: app)
+        appScanner.applyRemovalResult(result, to: app)
+        resultFailures = result.failures
+        if result.appRemoved {
             selectedAppIDs.remove(app.id)
             detailedApp = nil
         }
-        resultMessage = result.failedCount == 0
-            ? localized("操作成功完成。", "Operation completed successfully.")
-            : localized("有 \(result.failedCount) 个项目失败并已保留。", "\(result.failedCount) items failed and remain listed.")
+        if includeApp {
+            resultMessage = result.appRemoved
+                ? localized("应用已卸载。", "The app has been uninstalled.")
+                : localized("应用本体未能移除，仍保留在列表中。", "The app bundle could not be removed and remains listed.")
+            let failedResiduals = result.failedPaths.filter { $0.standardizedFileURL != app.path.standardizedFileURL }.count
+            if failedResiduals > 0 {
+                resultMessage += localized("\n另有 \(failedResiduals) 个残留项目未能移除。", "\n\(failedResiduals) residual items could not be removed.")
+            }
+        } else {
+            resultMessage = result.failedCount == 0
+                ? localized("残留清理完成，应用已保留。", "Residual cleanup completed. The app was kept.")
+                : localized("有 \(result.failedCount) 个残留项目未能移除，应用已保留。", "\(result.failedCount) residual items could not be removed. The app was kept.")
+        }
         isRemoving = false
         showResult = true
     }

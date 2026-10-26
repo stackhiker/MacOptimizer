@@ -153,6 +153,7 @@ struct SmartCleanerView: View {
 ), role: .destructive) {
                 Task {
                     let result = await service.cleanAll()
+                    guard !service.cleaningWasStopped else { return }
                     deleteResult = (result.success, result.failed, result.size)
                     failedFiles = result.failedFiles
                     if result.failed > 0 && !failedFiles.isEmpty {
@@ -166,10 +167,11 @@ struct SmartCleanerView: View {
         } message: {
             Text(loc.text("将清理所有选中的垃圾文件，释放空间。", "Clean all selected files to free up space."))
         }
-        .alert(loc.text("部分文件需要管理员权限", "Some Files Require Admin Privileges"), isPresented: $showRetryWithAdmin) {
-             Button(loc.text("使用管理员权限删除", "Delete with Admin"), role: .destructive) {
+        .alert(loc.text("部分文件未能移至废纸篓", "Some Files Could Not Be Moved to Trash"), isPresented: $showRetryWithAdmin) {
+             Button(loc.text("重试移至废纸篓", "Retry Moving to Trash"), role: .destructive) {
                  Task {
-                     let adminResult = await service.cleanWithPrivileges(files: failedFiles)
+                     let adminResult = await service.retryFailedFiles(failedFiles)
+                    guard !service.cleaningWasStopped else { return }
                      if let currentResult = deleteResult {
                          deleteResult = (
                              currentResult.success + adminResult.success,

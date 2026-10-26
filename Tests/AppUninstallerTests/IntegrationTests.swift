@@ -41,7 +41,7 @@ final class IntegrationTests: XCTestCase {
             
             // Scan directory
             let scanner = LargeFileScanner()
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             let files = scanner.foundFiles
             
             // Verify files were found
@@ -72,7 +72,7 @@ final class IntegrationTests: XCTestCase {
             // Scan directory
             let scanner = LargeFileScanner()
             let startTime = Date()
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             let files = scanner.foundFiles
             let elapsed = Date().timeIntervalSince(startTime)
             
@@ -106,7 +106,7 @@ final class IntegrationTests: XCTestCase {
             
             // Scan directory
             let scanner = LargeFileScanner()
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             let files = scanner.foundFiles
             
             // Verify files were found
@@ -146,7 +146,7 @@ final class IntegrationTests: XCTestCase {
             
             // Scan directory
             let scanner = LargeFileScanner()
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             let files = scanner.foundFiles
             
             // Verify files were found
@@ -185,7 +185,7 @@ final class IntegrationTests: XCTestCase {
             // Simulate scanning with UI updates
             let startTime = Date()
             
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             let files = scanner.foundFiles
             
             // Simulate UI updates during scan
@@ -244,7 +244,7 @@ final class IntegrationTests: XCTestCase {
         XCTAssertLessThan(elapsed, 2.0, "Cache operations should be responsive")
     }
     
-    func testUIResponsivenessDuringBackgroundTasks() async {
+    func testUIResponsivenessDuringBackgroundTasks() async throws {
         let taskQueue = BackgroundTaskQueue()
         let updater = BatchedUIUpdater(debounceDelay: 0.01)
         
@@ -255,7 +255,7 @@ final class IntegrationTests: XCTestCase {
         
         // Enqueue background tasks
         for _ in 0..<20 {
-            _ = await taskQueue.enqueue {
+            _ = try await taskQueue.enqueue {
                 backgroundTasks += 1
                 usleep(5_000) // 5ms per task
             }
@@ -307,7 +307,7 @@ final class IntegrationTests: XCTestCase {
     // Requirements: 1.1, 5.1, 6.2
     
     func testCachePersistenceAcrossAppRestart() throws {
-        let persistence = try CachePersistence()
+        let persistence = try makeTemporaryCachePersistence()
         
         defer {
             try? persistence.clearAll()
@@ -342,7 +342,7 @@ final class IntegrationTests: XCTestCase {
     }
     
     func testCachePersistenceWithExpiredEntries() throws {
-        let persistence = try CachePersistence()
+        let persistence = try makeTemporaryCachePersistence()
         
         defer {
             try? persistence.clearAll()
@@ -381,7 +381,7 @@ final class IntegrationTests: XCTestCase {
     }
     
     func testCachePersistenceWithLargeDataset() throws {
-        let persistence = try CachePersistence()
+        let persistence = try makeTemporaryCachePersistence()
         
         defer {
             try? persistence.clearAll()
@@ -414,7 +414,7 @@ final class IntegrationTests: XCTestCase {
     }
     
     func testCachePersistenceErrorHandling() throws {
-        let persistence = try CachePersistence()
+        let persistence = try makeTemporaryCachePersistence()
         
         defer {
             try? persistence.clearAll()
@@ -462,7 +462,7 @@ final class IntegrationTests: XCTestCase {
             let taskQueue = BackgroundTaskQueue()
             let updater = BatchedUIUpdater(debounceDelay: 0.01)
             let monitor = PerformanceMonitor()
-            let persistence = try CachePersistence()
+            let persistence = try makeTemporaryCachePersistence()
             
             defer {
                 try? persistence.clearAll()
@@ -470,7 +470,7 @@ final class IntegrationTests: XCTestCase {
             
             // Step 1: Scan directory with performance monitoring
             let scanToken = monitor.startMeasuring("directoryScan")
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             let files = scanner.foundFiles
             monitor.endMeasuring(scanToken)
             
@@ -488,7 +488,7 @@ final class IntegrationTests: XCTestCase {
             // Step 3: Process with background tasks
             var processedCount = 0
             for file in files {
-                _ = await taskQueue.enqueue {
+                _ = try await taskQueue.enqueue {
                     processedCount += 1
                 }
             }
@@ -546,7 +546,7 @@ final class IntegrationTests: XCTestCase {
         
         async let backgroundTask = {
             for _ in 0..<50 {
-                _ = await taskQueue.enqueue {
+                _ = try await taskQueue.enqueue {
                     taskOps += 1
                 }
             }
@@ -560,7 +560,7 @@ final class IntegrationTests: XCTestCase {
             }
         }()
         
-        _ = await (cacheTask, backgroundTask, uiTask)
+        _ = try await (cacheTask, backgroundTask, uiTask)
         
         // Verify all operations completed
         XCTAssertEqual(cacheOps, 50, "All cache operations should complete")

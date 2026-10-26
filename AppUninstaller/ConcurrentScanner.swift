@@ -310,9 +310,27 @@ actor BatchUIUpdater {
 
 import CryptoKit
 
+/// Bounded-memory hashing, with cancellation checked between 1 MiB reads.
+enum FileHashing {
+    static func md5(at url: URL, shouldCancel: () -> Bool = { Task.isCancelled }) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var digest = Insecure.MD5()
+        do {
+            while true {
+                if shouldCancel() { return nil }
+                guard let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty else { break }
+                digest.update(data: data)
+            }
+            return digest.finalize().map { String(format: "%02x", $0) }.joined()
+        } catch { return nil }
+    }
+}
+
 /// 并发计算多个文件的 MD5 哈希
 func computeHashesConcurrently(for urls: [URL], maxConcurrency: Int = 8) async -> [URL: String] {
     var results: [URL: String] = [:]
+    let limit = max(1, maxConcurrency)
     
     await withTaskGroup(of: (URL, String?).self) { group in
         // 使用信号量控制并发数
@@ -321,16 +339,14 @@ func computeHashesConcurrently(for urls: [URL], maxConcurrency: Int = 8) async -
         
         while urlIndex < urls.count || pendingCount > 0 {
             // 添加新任务直到达到最大并发数
-            while pendingCount < maxConcurrency && urlIndex < urls.count {
+            if Task.isCancelled { group.cancelAll(); break }
+            while pendingCount < limit && urlIndex < urls.count {
                 let url = urls[urlIndex]
                 urlIndex += 1
                 pendingCount += 1
                 
                 group.addTask {
-                    guard let data = try? Data(contentsOf: url) else { return (url, nil) }
-                    let digest = Insecure.MD5.hash(data: data)
-                    let hash = digest.map { String(format: "%02x", $0) }.joined()
-                    return (url, hash)
+                    return (url, FileHashing.md5(at: url))
                 }
             }
             

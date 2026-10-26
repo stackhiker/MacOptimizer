@@ -184,8 +184,13 @@ class SafetyGuard {
     ///   - ignoreProtection: 是否忽略目录保护（用于用户明确选择的大文件清理）
     /// - Returns: true表示安全,false表示不能删除
     func isSafeToDelete(_ url: URL, ignoreProtection: Bool = false) -> Bool {
-        let path = url.path
-        
+        let checkedURL = url.standardizedFileURL.resolvingSymlinksInPath()
+        let path = checkedURL.path
+        let home = fileManager.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
+        guard !["/", "/Users", "/Volumes", "/Library", home, home + "/Library"].contains(path) else {
+            return false
+        }
+
         // 1. 检查是否是受保护的目录
         // 如果 ignoreProtection 为 true (用于大文件清理)，则放宽对 protectedDirectories 的检查
         // 但仍然禁止删除系统核心目录
@@ -193,7 +198,7 @@ class SafetyGuard {
             if ignoreProtection {
                 // 定义绝对不可删除的核心系统目录
                 let coreSystemPaths = ["/System", "/usr", "/bin", "/sbin", "/private/var/db", "/private/var/root", "/Library/Apple", "/Library/Security"]
-                let isCore = coreSystemPaths.contains { path.hasPrefix($0) }
+                let isCore = coreSystemPaths.contains { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
                 
                 if isCore {
                     print("[SafetyGuard] 🛡️ Core system path, cannot delete even with bypass: \(path)")
@@ -209,25 +214,25 @@ class SafetyGuard {
         }
         
         // 2. 检查是否是系统文件
-        if isSystemFile(url) {
+        if isSystemFile(checkedURL) {
             print("[SafetyGuard] 🛡️ System file, cannot delete: \(path)")
             return false
         }
         
         // 3. 检查是否是系统关键Preferences
-        if isSystemPreference(url) {
+        if isSystemPreference(checkedURL) {
             print("[SafetyGuard] 🛡️ System preference, cannot delete: \(path)")
             return false
         }
         
         // 4. 检查是否是关键应用配置
-        if isCriticalAppConfig(url) {
+        if isCriticalAppConfig(checkedURL) {
             print("[SafetyGuard] ⚠️ Critical app config, risky to delete: \(path)")
             // 注意: 这里返回true,但调用者应该谨慎处理
         }
         
         // 5. 🛡️ 新增: 保护已安装应用的关键目录
-        if let protection = isInstalledAppProtectedPath(url) {
+        if let protection = isInstalledAppProtectedPath(checkedURL) {
             if !protection.isSafeSubdir {
                 print("[SafetyGuard] 🛡️ Installed app data protected: \(path) (app: \(protection.bundleId))")
                 return false
@@ -349,8 +354,10 @@ class SafetyGuard {
         let expandedPath = NSString(string: path).expandingTildeInPath
         
         for protectedDir in protectedDirectories {
-            let expandedProtected = NSString(string: protectedDir).expandingTildeInPath
-            if expandedPath.hasPrefix(expandedProtected) {
+            let expandedProtected = URL(fileURLWithPath: NSString(string: protectedDir).expandingTildeInPath)
+                .standardizedFileURL.resolvingSymlinksInPath().path
+            if expandedPath == expandedProtected || expandedPath.hasPrefix(expandedProtected + "/") ||
+                expandedProtected.hasPrefix(expandedPath + "/") {
                 return true
             }
         }

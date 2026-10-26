@@ -159,9 +159,33 @@ class ResidualFile: Identifiable, ObservableObject, Hashable, Codable {
 }
 
 // MARK: - 删除结果
+struct RemovalFailure: Codable {
+    let path: URL
+    let message: String
+    let errorDomain: String
+    let errorCode: Int
+    let underlyingErrorDomain: String?
+    let underlyingErrorCode: Int?
+
+    init(path: URL, error: Error) {
+        let error = error as NSError
+        let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        self.path = path
+        self.message = error.localizedDescription
+        self.errorDomain = error.domain
+        self.errorCode = error.code
+        self.underlyingErrorDomain = underlying?.domain
+        self.underlyingErrorCode = underlying?.code
+    }
+}
+
 struct RemovalResult {
     let successCount: Int
-    let failedCount: Int
     let totalSizeRemoved: Int64
-    let failedPaths: [URL]
+    let completedPaths: [URL]
+    let failures: [RemovalFailure]
+    let appRemoved: Bool
+
+    var failedCount: Int { failures.count }
+    var failedPaths: [URL] { failures.map(\.path) }
 }

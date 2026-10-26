@@ -398,8 +398,27 @@ class AppCacheGroup: Identifiable, ObservableObject {
     }
 }
 
+private enum SmartScanSession {
+    @TaskLocal static var id: UUID?
+}
+
 // MARK: - 智能清理服务
 class SmartCleanerService: ObservableObject {
+
+    private let cleanupFile: (URL, Bool) async -> Bool
+    private let deletionAllowed: (URL, Bool) -> Bool
+
+    init(cleanupFile: @escaping (URL, Bool) async -> Bool = { url, permanent in
+        if permanent {
+            do { try FileManager.default.removeItem(at: url); return true } catch { return false }
+        }
+        return DeletionLogService.shared.logAndDelete(at: url, category: "SmartClean")
+    }, deletionAllowed: @escaping (URL, Bool) -> Bool = {
+        SafetyGuard.shared.isSafeToDelete($0, ignoreProtection: $1)
+    }) {
+        self.cleanupFile = cleanupFile
+        self.deletionAllowed = deletionAllowed
+    }
     
     // MARK: - 选中状态枚举
     enum SelectionState {
@@ -469,13 +488,38 @@ class SmartCleanerService: ObservableObject {
     }
     
     // 停止扫描标志
-    private var shouldStopScanning = false
+    @MainActor private var activeScanID: UUID?
+    private let scanStopLock = NSLock()
+    private var scanStopRequested = false
+    private var lastScanPathPublish = Date.distantPast
+    private var cleaningStopRequested = false
+
+    private func setCleaningCancelled(_ value: Bool) {
+        scanStopLock.lock()
+        cleaningStopRequested = value
+        scanStopLock.unlock()
+    }
+
+    private func isCleaningCancelled() -> Bool {
+        scanStopLock.lock()
+        defer { scanStopLock.unlock() }
+        return cleaningStopRequested
+    }
+    private var shouldStopScanning: Bool {
+        get { scanStopLock.lock(); defer { scanStopLock.unlock() }; return scanStopRequested }
+        set {
+            scanStopLock.lock()
+            scanStopRequested = newValue
+            if !newValue { lastScanPathPublish = .distantPast }
+            scanStopLock.unlock()
+        }
+    }
     
     // 停止扫描方法
     @MainActor
     func stopScanning() {
         shouldStopScanning = true
-        isScanning = false
+        malwareScanner.stopScan()
         currentScanPath = ""
     }
     
@@ -495,6 +539,47 @@ class SmartCleanerService: ObservableObject {
         ]
     }
     
+    private func claimScanPathUpdate() -> Bool {
+        scanStopLock.lock()
+        defer { scanStopLock.unlock() }
+        let now = Date()
+        guard !scanStopRequested && now.timeIntervalSince(lastScanPathPublish) >= 0.1 else { return false }
+        lastScanPathPublish = now
+        return true
+    }
+
+    private func publishScanPath(_ path: String) async {
+        guard claimScanPathUpdate(), !Task.isCancelled else { return }
+        await MainActor.run {
+            guard isScanning && !shouldStopScanning else { return }
+            currentScanPath = path
+        }
+    }
+
+    private func withScanSession(_ operation: @escaping () async -> Void) async {
+        let id = SmartScanSession.id ?? UUID()
+        let state = await MainActor.run { () -> (allowed: Bool, ownsSession: Bool) in
+            if let activeScanID { return (activeScanID == id, false) }
+            guard !isCleaning && !Task.isCancelled else { return (false, false) }
+            activeScanID = id
+            shouldStopScanning = false
+            isScanning = true
+            return (true, true)
+        }
+        guard state.allowed else { return }
+        if !shouldStopScanning && !Task.isCancelled {
+            await SmartScanSession.$id.withValue(id) { await operation() }
+        }
+        if state.ownsSession {
+            await MainActor.run {
+                guard activeScanID == id else { return }
+                activeScanID = nil
+                isScanning = false
+                currentScanPath = ""
+            }
+        }
+    }
+
     // MARK: - 系统垃圾总大小
     var systemJunkTotalSize: Int64 {
         let systemCache = systemCacheFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
@@ -970,6 +1055,10 @@ class SmartCleanerService: ObservableObject {
     
     // MARK: - 扫描系统垃圾
     func scanSystemJunk() async {
+        await withScanSession { await self.performScanSystemJunk() }
+    }
+
+    private func performScanSystemJunk() async {
         await MainActor.run {
             isScanning = true
             // Remove unconditional reset to 0
@@ -1066,9 +1155,7 @@ class SmartCleanerService: ObservableObject {
             if fileManager.isReadableFile(atPath: url.path) {
                 if let contents = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) {
                     for itemURL in contents {
-                        Task.detached { @MainActor in
-                            self.currentScanPath = itemURL.path
-                        }
+                        await self.publishScanPath(itemURL.path)
                         let size = calculateSize(at: itemURL)
                         // 优化：取消大小限制，确保扫描所有缓存
                         if size > 0 { 
@@ -1112,9 +1199,7 @@ class SmartCleanerService: ObservableObject {
         ]
         
         for devCacheURL in developerCaches {
-            Task.detached { @MainActor in
-                self.currentScanPath = devCacheURL.path
-            }
+            await self.publishScanPath(devCacheURL.path)
             if fileManager.fileExists(atPath: devCacheURL.path) {
                 let size = calculateSize(at: devCacheURL)
                 if size > 10 * 1024 { // 降低到 10KB（开发者缓存通常较大）
@@ -1997,6 +2082,7 @@ class SmartCleanerService: ObservableObject {
             // 使用 directoryEnumerator 进行递归扫描，跳过隐藏文件
             if let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
                 while let fileURL = enumerator.nextObject() as? URL {
+                if shouldStopScanning || Task.isCancelled { break }
                     let ext = fileURL.pathExtension.lowercased()
                     // 扩展检查范围
                     if ["log", "txt", "crash", "diag", "out", "err", "panic"].contains(ext) || fileURL.lastPathComponent.contains("log") {
@@ -2031,6 +2117,7 @@ class SmartCleanerService: ObservableObject {
         if fileManager.fileExists(atPath: logsURL.path) {
             if let enumerator = fileManager.enumerator(at: logsURL, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
                 while let fileURL = enumerator.nextObject() as? URL {
+                if shouldStopScanning || Task.isCancelled { break }
                     if let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey]),
                        let isDir = values.isDirectory, !isDir,
                        let size = values.fileSize, size > 0 {
@@ -2052,6 +2139,7 @@ class SmartCleanerService: ObservableObject {
         if fileManager.fileExists(atPath: appSupportURL.path) {
              if let enumerator = fileManager.enumerator(at: appSupportURL, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: [.skipsHiddenFiles]) {
                 while let fileURL = enumerator.nextObject() as? URL {
+                if shouldStopScanning || Task.isCancelled { break }
                     // 只关心 .log 文件，严格匹配扩展名防误删
                     if fileURL.pathExtension.lowercased() == "log" {
                         if let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey]),
@@ -2077,6 +2165,10 @@ class SmartCleanerService: ObservableObject {
     
     // MARK: - 扫描重复文件 - 多线程优化版
     func scanDuplicates() async {
+        await withScanSession { await self.performScanDuplicates() }
+    }
+
+    private func performScanDuplicates() async {
         await MainActor.run {
             isScanning = true
             setProgress(0)
@@ -2138,6 +2230,7 @@ class SmartCleanerService: ObservableObject {
                     var results: [(String, CleanerFileItem)] = []
                     
                     for url in chunk {
+                        if self.shouldStopScanning || Task.isCancelled { break }
                         if let hash = self.md5Hash(of: url),
                            let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
                             let item = CleanerFileItem(
@@ -2198,9 +2291,12 @@ class SmartCleanerService: ObservableObject {
             options: [.skipsHiddenFiles]
         ) else { return results }
         
+        var lastUpdate = Date.distantPast
         while let fileURL = enumerator.nextObject() as? URL {
-            Task.detached { @MainActor in
-                self.currentScanPath = fileURL.path
+            if shouldStopScanning || Task.isCancelled { break }
+            if Date().timeIntervalSince(lastUpdate) >= 0.1 {
+                await MainActor.run { self.currentScanPath = fileURL.path }
+                lastUpdate = Date()
             }
             guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey]),
                   let isDir = values.isDirectory, !isDir,
@@ -2214,6 +2310,10 @@ class SmartCleanerService: ObservableObject {
     
     // MARK: - 扫描相似照片
     func scanSimilarPhotos() async {
+        await withScanSession { await self.performScanSimilarPhotos() }
+    }
+
+    private func performScanSimilarPhotos() async {
         await MainActor.run {
             isScanning = true
             setProgress(0)
@@ -2229,6 +2329,7 @@ class SmartCleanerService: ObservableObject {
         // 收集所有图片
         if let enumerator = fileManager.enumerator(at: picturesDir, includingPropertiesForKeys: [.fileSizeKey]) {
             while let fileURL = enumerator.nextObject() as? URL {
+                if shouldStopScanning || Task.isCancelled { break }
                 let ext = fileURL.pathExtension.lowercased()
                 if ["jpg", "jpeg", "png", "heic", "heif", "tiff"].contains(ext) {
                     totalCount += 1
@@ -2239,6 +2340,7 @@ class SmartCleanerService: ObservableObject {
         // 计算图片特征
         if let enumerator = fileManager.enumerator(at: picturesDir, includingPropertiesForKeys: [.fileSizeKey]) {
             while let fileURL = enumerator.nextObject() as? URL {
+                if shouldStopScanning || Task.isCancelled { break }
                 let ext = fileURL.pathExtension.lowercased()
                 guard ["jpg", "jpeg", "png", "heic", "heif", "tiff"].contains(ext) else { continue }
                 
@@ -2259,6 +2361,7 @@ class SmartCleanerService: ObservableObject {
         var matched: Set<URL> = []
         
         for i in 0..<photos.count {
+            if shouldStopScanning || Task.isCancelled { break }
             guard !matched.contains(photos[i].url) else { continue }
             
             var groupFiles: [CleanerFileItem] = []
@@ -2271,6 +2374,7 @@ class SmartCleanerService: ObservableObject {
             ))
             
             for j in (i+1)..<photos.count {
+                if shouldStopScanning || Task.isCancelled { break }
                 guard !matched.contains(photos[j].url) else { continue }
                 
                 var distance: Float = 0
@@ -2308,6 +2412,10 @@ class SmartCleanerService: ObservableObject {
     
     // MARK: - 扫描多语言文件 - 多线程优化版
     func scanLocalizations() async {
+        await withScanSession { await self.performScanLocalizations() }
+    }
+
+    private func performScanLocalizations() async {
         await MainActor.run {
             isScanning = true
             scanProgress = 0
@@ -2386,7 +2494,11 @@ class SmartCleanerService: ObservableObject {
     }
     
     // MARK: - 扫描大文件 - 多线程优化版
-    func scanLargeFiles(minSize: Int64 = 100 * 1024 * 1024) async { // 默认 100MB
+    func scanLargeFiles(minSize: Int64 = 100 * 1024 * 1024) async {
+        await withScanSession { await self.performScanLargeFiles(minSize: minSize) }
+    }
+
+    private func performScanLargeFiles(minSize: Int64) async { // 默认 100MB
         await MainActor.run {
             isScanning = true
             setProgress(0)
@@ -2477,9 +2589,8 @@ class SmartCleanerService: ObservableObject {
         ) else { return items }
         
         while let fileURL = enumerator.nextObject() as? URL {
-            Task.detached { @MainActor in
-                self.currentScanPath = fileURL.path
-            }
+            if shouldStopScanning || Task.isCancelled { break }
+            await self.publishScanPath(fileURL.path)
             // 跳过 Library 等系统目录
             if fileURL.path.contains("/Library/") || fileURL.path.contains("/.git/") {
                 continue
@@ -2505,6 +2616,10 @@ class SmartCleanerService: ObservableObject {
     
     // MARK: - 扫描性能优化 (内存占用过高)
     func scanPerformanceApps() async {
+        await withScanSession { await self.performScanPerformanceApps() }
+    }
+
+    private func performScanPerformanceApps() async {
         await MainActor.run {
             currentCategory = .performanceApps
             currentScanPath = "Preparing performance scan..."
@@ -2526,10 +2641,7 @@ class SmartCleanerService: ObservableObject {
             
             // 实时更新扫描路径 (UI 显示正在扫描的应用名称)
             let appName = app.localizedName ?? "Unknown"
-            Task.detached { @MainActor in
-                self.currentScanPath = "Scanning \(appName)..." // Use localized string if possible, but for path usually raw path or name is fine. 
-                // SystemJunk sets path. Here we set "Scanning AppName..."
-            }
+            await self.publishScanPath("Scanning \(appName)...")
             
             // 检查内存
             if let memory = memoryMap[app.processIdentifier] {
@@ -2632,9 +2744,7 @@ class SmartCleanerService: ObservableObject {
     // MARK: - 辅助方法
     
     private func md5Hash(of url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        let digest = Insecure.MD5.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
+        FileHashing.md5(at: url) { self.shouldStopScanning || Task.isCancelled }
     }
     
     private func extractImageFingerprint(from url: URL) async -> VNFeaturePrintObservation? {
@@ -2718,6 +2828,11 @@ class SmartCleanerService: ObservableObject {
     // MARK: - 重置所有扫描结果
     @MainActor
     func resetAll() {
+        guard activeScanID == nil && !isCleaning else {
+            stopScanning()
+            stopCleaning()
+            return
+        }
         userCacheFiles = []
         systemCacheFiles = []
         oldUpdateFiles = []
@@ -2739,10 +2854,15 @@ class SmartCleanerService: ObservableObject {
     }
     
     // MARK: - 一键扫描所有
+    @MainActor
     func scanAll() async {
+        await withScanSession { await self.performScanAll() }
+    }
+
+    @MainActor
+    private func performScanAll() async {
         // 重置停止标志和已扫描分类
         await MainActor.run { 
-            shouldStopScanning = false
             scannedCategories = []
             scanProgress = 0.0
             isScanning = true
@@ -2759,7 +2879,7 @@ class SmartCleanerService: ObservableObject {
         await scanSystemJunk()
         
         await MainActor.run { _ = scannedCategories.insert(.systemJunk); scanProgress = 0.125 }
-        if shouldStopScanning { return }
+        if shouldStopScanning || Task.isCancelled { return }
         
         // --- 2. 重复文件 ---
         await MainActor.run { 
@@ -2769,7 +2889,7 @@ class SmartCleanerService: ObservableObject {
         }
         await scanDuplicates()
         await MainActor.run { _ = scannedCategories.insert(.duplicates); scanProgress = 0.25 }
-        if shouldStopScanning { return }
+        if shouldStopScanning || Task.isCancelled { return }
         
         // --- 3. 相似照片 ---
         await MainActor.run { 
@@ -2779,7 +2899,7 @@ class SmartCleanerService: ObservableObject {
         }
         await scanSimilarPhotos()
         await MainActor.run { _ = scannedCategories.insert(.similarPhotos); scanProgress = 0.375 }
-        if shouldStopScanning { return }
+        if shouldStopScanning || Task.isCancelled { return }
         
         // --- 4. 大文件 ---
         await MainActor.run { 
@@ -2789,7 +2909,7 @@ class SmartCleanerService: ObservableObject {
         }
         await scanLargeFiles()
         await MainActor.run { _ = scannedCategories.insert(.largeFiles); scanProgress = 0.5 }
-        if shouldStopScanning { return }
+        if shouldStopScanning || Task.isCancelled { return }
         
         // --- 5. 病毒扫描 ---
         await MainActor.run { 
@@ -2798,13 +2918,13 @@ class SmartCleanerService: ObservableObject {
             progressRange = (0.5, 0.625)
             // Malware scanner doesn't report progress yet, so it bars 0.5-0.625
         }
-        await malwareScanner.scan()
+        await malwareScanner.scan(shouldCancel: { self.shouldStopScanning || Task.isCancelled })
         await MainActor.run { 
             self.virusThreats = self.malwareScanner.threats
             _ = scannedCategories.insert(.virus)
             scanProgress = 0.625
         }
-        if shouldStopScanning { return }
+        if shouldStopScanning || Task.isCancelled { return }
         
         // --- 6. 启动项扫描 ---
         await MainActor.run { 
@@ -2818,7 +2938,7 @@ class SmartCleanerService: ObservableObject {
             _ = scannedCategories.insert(.startupItems)
             scanProgress = 0.75
         }
-        if shouldStopScanning { return }
+        if shouldStopScanning || Task.isCancelled { return }
         
         // --- 7. 性能优化 (查找高内存应用) ---
         await MainActor.run { 
@@ -2830,7 +2950,7 @@ class SmartCleanerService: ObservableObject {
             _ = scannedCategories.insert(.performanceApps)
             scanProgress = 0.875
         }
-        if shouldStopScanning { return }
+        if shouldStopScanning || Task.isCancelled { return }
         
         // --- 8. 应用更新检查 ---
         await MainActor.run { 
@@ -2845,7 +2965,7 @@ class SmartCleanerService: ObservableObject {
             scanProgress = 1.0 // Ensure finish
             progressRange = (0.0, 1.0) // Reset range
         }
-        if shouldStopScanning { return }
+        if shouldStopScanning || Task.isCancelled { return }
 
         
         // 扫描结束
@@ -2859,468 +2979,164 @@ class SmartCleanerService: ObservableObject {
     @Published var cleaningDescription: String = ""
     @Published var cleaningCurrentCategory: CleanerCategory? = nil
     @Published var cleanedCategories: Set<CleanerCategory> = []
-    
-    // MARK: - 一键清理所有
-    /// 停止清理任务
+    @Published private(set) var cleaningWasStopped = false
+
+    @MainActor
     func stopCleaning() {
-        self.isCleaning = false
-        // Reset cleaning state if needed
-        DispatchQueue.main.async {
-            self.cleaningCurrentCategory = .systemJunk
-        }
+        guard isCleaning else { return }
+        cleaningWasStopped = true
+        setCleaningCancelled(true)
+        malwareScanner.stopRemoval()
     }
 
-    /// 执行所有选中的清理任务
+    @MainActor
     func cleanAll() async -> (success: Int, failed: Int, size: Int64, failedFiles: [CleanerFileItem]) {
-        await MainActor.run {
-            isCleaning = true
-            cleaningDescription = "Preparing..."
-            cleanedCategories = []
-            cleaningCurrentCategory = nil
-        }
-        
+        guard !isCleaning && !isScanning else { return (0, 0, 0, []) }
+        isCleaning = true
+        cleaningWasStopped = false
+        setCleaningCancelled(false)
+        cleanedCategories = []
+        totalCleanedSize = 0
+        totalResolvedThreats = 0
+        totalOptimizedItems = 0
         defer {
-            Task { @MainActor in isCleaning = false }
+            isCleaning = false
+            cleaningCurrentCategory = nil
+            cleaningDescription = ""
         }
-        
-        var totalSuccess = 0
-        var totalFailed = 0
-        var totalSize: Int64 = 0
+
+        let junk = systemCacheFiles + userCacheFiles + oldUpdateFiles + trashFiles + systemLogFiles + userLogFiles
+            + appCacheGroups.flatMap(\.files)
+        let batches: [(CleanerCategory, [CleanerFileItem], Bool)] = [
+            (.systemJunk, junk, false),
+            (.duplicates, duplicateGroups.flatMap { Array($0.files.dropFirst()) }, false),
+            (.similarPhotos, similarPhotoGroups.flatMap { Array($0.files.dropFirst()) }, false),
+            (.largeFiles, largeFiles, true)
+        ]
+        var seen = Set<String>()
+        var completed = Set<String>()
         var failedFiles: [CleanerFileItem] = []
-        
-        // 辅助函数:安全删除文件
-        func safeDelete(file: CleanerFileItem, bypassProtection: Bool = false) -> Bool {
-            let url = file.url
-            let path = url.path
-            
-            // ⚠️ 安全修复: 使用SafetyGuard检查
-            // 对于大文件清理，如果用户明确选择了，我们允许绕过目录保护 (bypassProtection = true)
-            if !SafetyGuard.shared.isSafeToDelete(url, ignoreProtection: bypassProtection) {
-                print("[SmartCleaner] 🛡️ SafetyGuard blocked deletion: \(path)")
-                failedFiles.append(file)
-                return false
-            }
-            
-            // 特殊处理:如果是废纸篓中的文件,可以直接删除
-            if path.contains("/.Trash/") || path.hasSuffix("/.Trash") {
-                do {
-                    try fileManager.removeItem(at: url)
-                    print("[SmartCleaner] ✅ Deleted trash file: \(file.name)")
-                    return true
-                } catch {
-                    print("[SmartCleaner] ⚠️ Failed to delete trash file: \(error)")
+        var success = 0
+        var failed = 0
+        var size: Int64 = 0
+        for (category, files, bypassProtection) in batches {
+            guard !cleaningWasStopped && !Task.isCancelled else { break }
+            cleaningCurrentCategory = category
+            for file in files where file.isSelected {
+                guard !cleaningWasStopped && !Task.isCancelled else { break }
+                let path = file.url.standardizedFileURL.path
+                guard seen.insert(path).inserted else { continue }
+                // A previously removed parent already accounts for this item.
+                guard !completed.contains(where: { path.hasPrefix($0 + "/") }) else { continue }
+                if await deleteCleanupFile(file, bypassProtection: bypassProtection) {
+                    completed.insert(path)
+                    success += 1
+                    size += file.size
+                    totalCleanedSize = size
+                } else {
+                    failed += 1
                     failedFiles.append(file)
-                    return false
                 }
+                await Task.yield()
             }
-            
-            // 1. 检查文件是否可写/可删除
-            if !fileManager.isDeletableFile(atPath: path) {
-                failedFiles.append(file)
-                return false
-            }
-            
-            // 2. 🛡️ 使用 DeletionLogService 安全删除并记录日志
-            // 这样文件可以从废纸篓恢复到原位置
-            if DeletionLogService.shared.logAndDelete(at: url, category: "SmartClean") {
-                print("[SmartCleaner] ✅ Moved to trash with log: \(file.name)")
-                return true
+            if !cleaningWasStopped && !Task.isCancelled { cleanedCategories.insert(category) }
+        }
+        removeCleanedFiles(completed)
+
+        if !cleaningWasStopped && !Task.isCancelled && !virusThreats.isEmpty {
+            cleaningCurrentCategory = .virus
+            let selected = virusThreats.filter(\.isSelected)
+            malwareScanner.threats = virusThreats
+            let result = await malwareScanner.removeThreats(shouldCancel: { self.isCleaningCancelled() || Task.isCancelled })
+            let remaining = Set(malwareScanner.threats.map(\.path))
+            let removedSize = selected.filter { !remaining.contains($0.path) }.reduce(Int64(0)) { $0 + $1.size }
+            success += result.success
+            failed += result.failed
+            size += removedSize
+            virusThreats = malwareScanner.threats
+            totalResolvedThreats = result.success
+            totalCleanedSize = size
+            cleanedCategories.insert(.virus)
+        }
+        for item in startupItems where item.isSelected && item.isEnabled {
+            guard !cleaningWasStopped && !Task.isCancelled else { break }
+            cleaningCurrentCategory = .startupItems
+            if await systemOptimizer.toggleAgent(item) {
+                success += 1
+                totalOptimizedItems += 1
             } else {
-                print("[SmartCleaner] ⚠️ Failed to delete: \(file.name)")
-                failedFiles.append(file)
-                return false
+                failed += 1
             }
         }
-        
-        // 1. 清理系统垃圾
-        await MainActor.run {
-            cleaningCurrentCategory = .systemJunk
-            cleaningDescription = "Cleaning System Junk..."
+        if !cleaningWasStopped && !Task.isCancelled && hasAppUpdates, let url = updateChecker.downloadURL {
+            NSWorkspace.shared.open(url)
         }
-        
-        // 执行各子步骤清理...
-        // 用户缓存 (包括散项和按应用分组的项目)
-        for file in userCacheFiles where file.isSelected {
-            if safeDelete(file: file) {
-                totalSize += file.size
-                totalSuccess += 1
-            } else { totalFailed += 1 }
-        }
-        
-        for group in appCacheGroups {
-            for file in group.files where file.isSelected {
-                if safeDelete(file: file) {
-                    totalSize += file.size
-                    totalSuccess += 1
-                } else { totalFailed += 1 }
-            }
-        }
-        
-        // 系统缓存
-        // ⚠️ 严重 BUG 修复：添加 isSelected 检查
-        for file in systemCacheFiles where file.isSelected {
-            if safeDelete(file: file) {
-                totalSize += file.size
-                totalSuccess += 1
-            } else { totalFailed += 1 }
-        }
-        
-        // 旧更新
-        // ⚠️ 严重 BUG 修复：添加 isSelected 检查
-
-        
-        // 日志
-        // ⚠️ 严重 BUG 修复：添加 isSelected 检查
-        // Reset Real-time Stats
-        await MainActor.run {
-            self.totalCleanedSize = 0
-            self.totalResolvedThreats = 0
-            self.totalOptimizedItems = 0
-        }
-        
-        // 1. 清理系统垃圾 (System Junk + User Cache)
-        let systemJunk = systemCacheFiles + userCacheFiles + oldUpdateFiles + systemLogFiles + userLogFiles
-        if !systemJunk.isEmpty {
-           await MainActor.run { 
-               cleaningCurrentCategory = .systemJunk 
-               cleaningDescription = "Cleaning System Junk..."
-           }
-           
-           for file in systemJunk {
-               // Only clean selected files
-               guard file.isSelected else { continue }
-               
-               if safeDelete(file: file) {
-                   totalSize += file.size
-                   totalSuccess += 1
-                   await MainActor.run { self.totalCleanedSize += file.size }
-               } else { totalFailed += 1 }
-           }
-           
-           await MainActor.run { _ = cleanedCategories.insert(.systemJunk) }
-           try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-        
-
-        
-        // 2. 清理重复文件
-        if !duplicateGroups.isEmpty {
-            await MainActor.run {
-                cleaningCurrentCategory = .duplicates
-                cleaningDescription = "Cleaning Duplicates..."
-            }
-            // ⚠️ 严重 BUG 修复：添加 isSelected 检查
-            for i in 0..<duplicateGroups.count {
-                for j in 1..<duplicateGroups[i].files.count { // 保留第一个
-                    let file = duplicateGroups[i].files[j]
-                    guard file.isSelected else { continue }
-                    if safeDelete(file: file) {
-                        totalSize += file.size
-                        totalSuccess += 1
-                        await MainActor.run { self.totalCleanedSize += file.size }
-                    } else { totalFailed += 1 }
-                }
-            }
-            await MainActor.run { _ = cleanedCategories.insert(.duplicates) }
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s delay
-        }
-        
-        // 3. 清理相似照片
-        if !similarPhotoGroups.isEmpty {
-            await MainActor.run {
-                cleaningCurrentCategory = .similarPhotos
-                cleaningDescription = "Cleaning Similar Photos..."
-            }
-            // ⚠️ 严重 BUG 修复：添加 isSelected 检查
-            for i in 0..<similarPhotoGroups.count {
-                for j in 1..<similarPhotoGroups[i].files.count {
-                    let file = similarPhotoGroups[i].files[j]
-                    guard file.isSelected else { continue }
-                    if safeDelete(file: file) {
-                        totalSize += file.size
-                        totalSuccess += 1
-                        await MainActor.run { self.totalCleanedSize += file.size }
-                    } else { totalFailed += 1 }
-                }
-            }
-            await MainActor.run { _ = cleanedCategories.insert(.similarPhotos) }
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s delay
-        }
-        
-        // 4. 清理多语言本地化文件
-        // ⚠️ 严重 BUG 修复：完全禁用此功能
-        // 删除应用的 .lproj 文件会破坏 macOS 代码签名，导致应用报告"已损坏"无法启动
-        // if !localizationFiles.isEmpty {
-        //     await MainActor.run {
-        //         cleaningCurrentCategory = .localizations
-        //         cleaningDescription = "Cleaning Localizations..."
-        //     }
-        //     for file in localizationFiles {
-        //          if file.isSelected {
-        //              if safeDelete(file: file) {
-        //                 totalSize += file.size
-        //                 totalSuccess += 1
-        //             } else { totalFailed += 1 }
-        //          }
-        //     }
-        //     await MainActor.run { _ = cleanedCategories.insert(.localizations) }
-        // }
-        
-        // 5. 清理大文件
-        if !largeFiles.isEmpty {
-            await MainActor.run {
-                cleaningCurrentCategory = .largeFiles
-                cleaningDescription = "Cleaning Large Files..."
-            }
-            for file in largeFiles where file.isSelected {
-                 // 大文件通常在受保护目录（如 Documents），需要 bypassProtection
-                 if safeDelete(file: file, bypassProtection: true) {
-                    totalSize += file.size
-                    totalSuccess += 1
-                    await MainActor.run { self.totalCleanedSize += file.size }
-                } else { totalFailed += 1 }
-            }
-            await MainActor.run { _ = cleanedCategories.insert(.largeFiles) }
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s delay
-        }
-        
-        // 6. 清理病毒
-        if !virusThreats.isEmpty {
-            await MainActor.run {
-                cleaningCurrentCategory = .virus
-                cleaningDescription = "Removing Threats..."
-            }
-            let (vSuccess, vFailed) = await malwareScanner.removeThreats()
-            totalSuccess += vSuccess
-            totalFailed += vFailed
-            // Virus size is approximate or pre-calculated
-            totalSize += virusTotalSize 
-             await MainActor.run { _ = cleanedCategories.insert(.virus) }
-             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s delay
-        }
-        
-        // 7. 优化启动项
-        if !startupItems.isEmpty {
-            await MainActor.run {
-                cleaningCurrentCategory = .startupItems
-                cleaningDescription = "Disabling Startup Items..."
-            }
-            for item in startupItems where item.isSelected {
-                if await systemOptimizer.toggleAgent(item) {
-                    totalSuccess += 1
-                } else {
-                    totalFailed += 1
-                }
-            }
-             await MainActor.run { _ = cleanedCategories.insert(.startupItems) }
-             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s delay
-        }
-        
-        // 8. 性能优化 (关闭后台应用)
-        // ⚠️ 暂时禁用：用户反馈智能扫描清理会把应用搞废，暂时隐藏此功能
-        // if !performanceApps.isEmpty {
-        //     await MainActor.run {
-        //         cleaningCurrentCategory = .performanceApps
-        //         cleaningDescription = "Optimizing Performance..."
-        //     }
-        //     // 确保 SystemOptimizer 里的 runningApps 被选中
-        //      await MainActor.run {
-        //          for app in self.performanceApps where app.isSelected {
-        //              // Sync selection just in case
-        //              if let optimizerApp = self.systemOptimizer.runningApps.first(where: { $0.id == app.id }) {
-        //                  optimizerApp.isSelected = true
-        //              }
-        //          }
-        //      }
-        //     let killed = await systemOptimizer.terminateSelectedApps()
-        //     totalSuccess += killed
-        //      await MainActor.run { _ = cleanedCategories.insert(.performanceApps) }
-        // }
-        
-        // 9. 应用更新
-        if hasAppUpdates {
-            await MainActor.run {
-                cleaningCurrentCategory = .appUpdates
-                cleaningDescription = "Updating Apps..."
-            }
-            // 触发更新下载或打开页面? 
-            if let url = updateChecker.downloadURL {
-                NSWorkspace.shared.open(url)
-                totalSuccess += 1
-            }
-             await MainActor.run { _ = cleanedCategories.insert(.appUpdates) }
-        }
-
-        // 10. 提权清理失败的文件
-        if !failedFiles.isEmpty {
-            let (sudoSuccess, _, sudoSize) = await cleanWithPrivileges(files: failedFiles)
-            totalSuccess += sudoSuccess
-            // 如果提权删除成功，原来的 totalFailed 需要减去这些成功的
-            totalFailed -= sudoSuccess 
-            totalSize += sudoSize
-            
-            // 更新 failedFiles 列表，移除那些已成功删除的
-            // 简单的方法是重新检查存在性
-             var remainingFailed: [CleanerFileItem] = []
-             for file in failedFiles {
-                 if fileManager.fileExists(atPath: file.url.path) {
-                     remainingFailed.append(file)
-                 }
-             }
-             failedFiles = remainingFailed
-        }
-        
-        // 刷新所有数据
-        await MainActor.run { [failedFiles] in
-            // 只移除成功的，保留失败的
-            let failedSet = Set(failedFiles.map(\.url))
-            
-            userCacheFiles = userCacheFiles.filter { failedSet.contains($0.url) }
-            systemCacheFiles = systemCacheFiles.filter { failedSet.contains($0.url) }
-            oldUpdateFiles = oldUpdateFiles.filter { failedSet.contains($0.url) }
-            systemLogFiles = systemLogFiles.filter { failedSet.contains($0.url) }
-            userLogFiles = userLogFiles.filter { failedSet.contains($0.url) }
-            
-            // 对于 duplicateGroups 和 similarPhotoGroups，重新扫描比较好，因为结构变了
-            // 这里简单处理：如果某个文件还在，就保留它
-             duplicateGroups = duplicateGroups.map { group in
-                 DuplicateGroup(hash: group.hash, files: group.files.filter { failedSet.contains($0.url) || $0 == group.files.first })
-             }.filter { $0.files.count > 1 }
-            
-             similarPhotoGroups = similarPhotoGroups.map { group in
-                 DuplicateGroup(hash: group.hash, files: group.files.filter { failedSet.contains($0.url) || $0 == group.files.first })
-             }.filter { $0.files.count > 1 }
-            
-            localizationFiles = localizationFiles.filter { failedSet.contains($0.url) || !$0.isSelected}
-            largeFiles = largeFiles.filter { failedSet.contains($0.url) || !$0.isSelected }
-            
-            
-            // 最终状态更新 (Capture stats before clearing logic completely, though arrays are filtered above)
-            // But wait, totalSize is passed in.
-            // self.totalCleanedSize = totalSize // Removed: Updated in real-time now
-            // We need to capture these from local vars if possible, but totalSuccess is aggregated.
-            // Let's assume for now:
-            // totalResolvedThreats was tracked? No.
-            // I need to modify the loop to track them or just assume if cleanedCategories contains .virus, then all were cleaned (or just use totalSize for now).
-            // Actually, I can't easily access local vSuccess here without changing the whole function structure.
-            // QUICK FIX: Since I can't easily change the whole function logic in a replace block without risk:
-            // I will use `totalSuccess` as a proxy if needed, OR I will modify the `cleanAll` to track them.
-            // BUT, verifying `cleanAll` again...
-            
-            cleaningCurrentCategory = nil
-            
-            for category in CleanerCategory.allCases {
-                if sizeFor(category: category) == 0 {
-                    cleanedCategories.insert(category)
-                } else {
-                    cleanedCategories.remove(category)
-                }
-            }
-        }
-        
-        // Re-assign because we are in MainActor run block above
-        // Actually, I should do it in the same block.
-        // Let's rewrite the MainActor block to include tracking if possible.
-        // Or just set them here.
-        await MainActor.run { [totalSize] in
-             // 估算/设置结果
-             self.totalCleanedSize = totalSize
-             // 由于 cleanAll 内部没有分开统计，我们这里做一些假设或需要修改 cleanAll 内部逻辑
-             // 为了安全起见，我们暂且认为:
-             // virusThreats 被清理了 (如果 cleanedCategories 包含 .virus) -> count = 之前的 count? 
-             // 但是 virusThreats 数组可能已经被清空/处理.
-             // Best effort:
-             self.totalResolvedThreats = self.virusThreats.count // 此时可能还未清空? removeThreats 可能已经清空了
-             // removeThreats() inside cleanAll calls malwareScanner.removeThreats(). It doesn't clear the `virusThreats` published var here?
-             // Actually, `virusThreats` is NOT cleared in cleanAll explicitly until maybe next scan?
-             // So `virusThreats.count` might still be valid for "How many were found".
-             // Startup items: same.
-             self.totalResolvedThreats = self.virusThreats.count
-             self.totalOptimizedItems = self.startupItems.filter { $0.isEnabled }.count // or similar
-             // Wait, `cleanAll` toggles them.
-        }
-
-        
-        return (totalSuccess, totalFailed, totalSize, failedFiles)
+        if Task.isCancelled { cleaningWasStopped = true }
+        return (success, failed, size, failedFiles)
     }
-    
-    // MARK: - 使用管理员权限清理失败的文件
-    func cleanWithPrivileges(files: [CleanerFileItem]) async -> (success: Int, failed: Int, size: Int64) {
-        if files.isEmpty {
-            return (0, 0, 0)
+
+    /// Retry uses the same safety checks and Trash behavior as the original run.
+    @MainActor
+    func retryFailedFiles(_ files: [CleanerFileItem]) async -> (success: Int, failed: Int, size: Int64) {
+        guard !isCleaning && !isScanning else { return (0, files.count, 0) }
+        isCleaning = true
+        cleaningWasStopped = false
+        setCleaningCancelled(false)
+        defer { isCleaning = false }
+        var success = 0
+        var failed = 0
+        var size: Int64 = 0
+        var seen = Set<String>()
+        var completed = Set<String>()
+        let selectedLargePaths = Set(largeFiles.filter(\.isSelected).map { $0.url.standardizedFileURL.path })
+        for file in files {
+            guard !cleaningWasStopped && !Task.isCancelled else { break }
+            let path = file.url.standardizedFileURL.path
+            guard seen.insert(path).inserted else { continue }
+            if await deleteCleanupFile(file, bypassProtection: selectedLargePaths.contains(path)) {
+                completed.insert(path)
+                success += 1
+                size += file.size
+            } else { failed += 1 }
+            await Task.yield()
         }
-        
-        await MainActor.run {
-            isCleaning = true
-            cleaningDescription = "Deleting with privileges..."
-            // Reset categories to cleaning state if needed
-            cleanedCategories = []
-        }
-        
-        defer {
-            Task { @MainActor in isCleaning = false }
-        }
-        
-        var totalSuccess = 0
-        var totalFailed = 0
-        var totalSize: Int64 = 0
-        
-        // 1. 创建临时脚本文件
-        let scriptContent = files.map { file in
-            // 使用引号包裹路径以处理空格
-            let escapedPath = file.url.path.replacingOccurrences(of: "\"", with: "\\\"")
-            // rm -rf "path" || true (忽略错误继续执行)
-            return "rm -rf \"\(escapedPath)\" || true"
-        }.joined(separator: "\n")
-        
-        // 添加 exit 0 确保脚本总是成功返回，避免 AppleScript 报错
-        let fullScript = "#!/bin/bash\n" + scriptContent + "\nexit 0"
-        
-        let tempScriptURL = fileManager.temporaryDirectory.appendingPathComponent("cleaner_script_\(UUID().uuidString).sh")
-        
-        do {
-            try fullScript.write(to: tempScriptURL, atomically: true, encoding: .utf8)
-            // 赋予执行权限
-            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptURL.path)
-            
-            // 2. 使用管理员权限执行该脚本
-            // 注意：我们这里只请求一次权限
-            let appleScriptCommand = "do shell script \"/bin/bash \(tempScriptURL.path)\" with administrator privileges"
-            
-            var error: NSDictionary?
-            if let appleScript = NSAppleScript(source: appleScriptCommand) {
-                appleScript.executeAndReturnError(&error)
-                
-                if error == nil {
-                    // 假设脚本执行完成后，我们需要验证哪些文件实际上被删除了
-                    for file in files {
-                        if !fileManager.fileExists(atPath: file.url.path) {
-                            totalSuccess += 1
-                            totalSize += file.size
-                        } else {
-                            totalFailed += 1
-                        }
-                    }
-                } else {
-                    // 脚本执行失败（可能是用户取消了授权）
-                    totalFailed = files.count
-                    print("Admin script error: \(String(describing: error))")
-                }
-            } else {
-                totalFailed = files.count
-            }
-            
-            // 3. 清理临时脚本
-            try? fileManager.removeItem(at: tempScriptURL)
-            
-        } catch {
-            print("Failed to create temp script: \(error)")
-            totalFailed = files.count
-        }
-        
-        return (totalSuccess, totalFailed, totalSize)
+        removeCleanedFiles(completed)
+        totalCleanedSize += size
+        return (success, failed, size)
     }
-    
+
+    private func deleteCleanupFile(_ file: CleanerFileItem, bypassProtection: Bool) async -> Bool {
+        guard deletionAllowed(file.url, bypassProtection) else { return false }
+        let trash = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Trash").standardizedFileURL.path
+        let isInTrash = file.url.standardizedFileURL.path.hasPrefix(trash + "/")
+        return await cleanupFile(file.url, isInTrash)
+    }
+
+    @MainActor
+    private func removeCleanedFiles(_ paths: Set<String>) {
+        let removed: (CleanerFileItem) -> Bool = { file in
+            let path = file.url.standardizedFileURL.path
+            return paths.contains(path) || paths.contains { path.hasPrefix($0 + "/") }
+        }
+        userCacheFiles.removeAll(where: removed)
+        systemCacheFiles.removeAll(where: removed)
+        oldUpdateFiles.removeAll(where: removed)
+        trashFiles.removeAll(where: removed)
+        systemLogFiles.removeAll(where: removed)
+        userLogFiles.removeAll(where: removed)
+        largeFiles.removeAll(where: removed)
+        for group in appCacheGroups { group.files.removeAll(where: removed) }
+        appCacheGroups.removeAll { $0.files.isEmpty }
+        duplicateGroups = duplicateGroups.compactMap { group in
+            let files = group.files.filter { !removed($0) }
+            return files.count > 1 ? DuplicateGroup(hash: group.hash, files: files) : nil
+        }
+        similarPhotoGroups = similarPhotoGroups.compactMap { group in
+            let files = group.files.filter { !removed($0) }
+            return files.count > 1 ? DuplicateGroup(hash: group.hash, files: files) : nil
+        }
+    }
+
     // MARK: - 全选/取消全选
     func selectAll(for category: CleanerCategory, selected: Bool) {
         switch category {

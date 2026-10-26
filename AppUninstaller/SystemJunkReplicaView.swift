@@ -151,7 +151,7 @@ struct SystemJunkReplicaView: View {
             }
             wasAnalyzing = analyzing
         }
-        .alert(localized("部分文件需要管理员权限", "Some Files Require Admin Privileges"), isPresented: $showAdminWarning) {
+        .alert(localized("部分文件未能移至废纸篓", "Some Files Could Not Be Moved to Trash"), isPresented: $showAdminWarning) {
             Button(localized("完成", "Done"), role: .cancel) { cleaningFinished = true }
         } message: {
             Text(localized("部分文件因权限不足无法删除。", "Some files could not be deleted because of insufficient privileges."))

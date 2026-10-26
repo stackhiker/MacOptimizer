@@ -17,9 +17,11 @@ class MenuBarManager: NSObject, ObservableObject {
     var popoverWindow: MenuBarWindow?
     var detailWindow: MenuBarWindow?
     var memoryAlertController: MemoryAlertWindowController?
+    private var mainAppWindow: NSWindow?
+    private var windowCloseObserver: NSObjectProtocol?
     
     // Shared Source of Truth
-    var systemMonitor = SystemMonitorService()
+    let systemMonitor = SystemMonitorService.shared
     
     @Published var isOpen: Bool = false
     @Published var currentDetailRoute: MenuBarRoute? = nil
@@ -122,7 +124,7 @@ class MenuBarManager: NSObject, ObservableObject {
         guard let window = popoverWindow else { return }
 
         isClosing = false
-        systemMonitor.startMonitoring()
+        systemMonitor.startMonitoring(client: "menuBar")
         DiskSpaceManager.shared.updateDiskSpace()
         
         // Position Logic
@@ -159,7 +161,7 @@ class MenuBarManager: NSObject, ObservableObject {
         
         guard let window = popoverWindow else {
             isClosing = false
-            systemMonitor.stopMonitoring()
+            systemMonitor.stopMonitoring(client: "menuBar")
             return
         }
         
@@ -170,7 +172,7 @@ class MenuBarManager: NSObject, ObservableObject {
             window.orderOut(nil)
             self.isOpen = false
             self.isClosing = false
-            self.systemMonitor.stopMonitoring()
+            self.systemMonitor.stopMonitoring(client: "menuBar")
         })
     }
     
@@ -260,14 +262,54 @@ class MenuBarManager: NSObject, ObservableObject {
     }
     
     // MARK: - Open Main App
+
+    func registerMainWindow(_ window: NSWindow) {
+        window.isReleasedWhenClosed = false
+        mainAppWindow = window
+        guard windowCloseObserver == nil else { return }
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let window = notification.object as? NSWindow,
+                  !(window is MenuBarWindow) else { return }
+            // willClose arrives before the window has been ordered out.
+            DispatchQueue.main.async { [weak self] in
+                guard self != nil else { return }
+                let hasVisibleWindow = NSApp.windows.contains {
+                    !($0 is MenuBarWindow) && $0.styleMask.contains(.titled) && $0.isVisible
+                }
+                if !hasVisibleWindow {
+                    NSApp.setActivationPolicy(.accessory)
+                }
+            }
+        }
+    }
+
+    func removeStatusItem() {
+        if let windowCloseObserver {
+            NotificationCenter.default.removeObserver(windowCloseObserver)
+            self.windowCloseObserver = nil
+        }
+        if let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+            self.statusItem = nil
+        }
+    }
     
     func openMainApp(module: AppModule? = nil) {
+        NSApp.setActivationPolicy(.regular)
         if let module {
             AppNavigationController.shared.selectedModule = module
         }
 
         // Close menu bar windows
         closeWindow()
+
+        if let mainAppWindow {
+            mainAppWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         
         // Find and show the main window
         // The main app window usually exists if app is running.

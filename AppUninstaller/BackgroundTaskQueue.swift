@@ -1,67 +1,58 @@
 import Foundation
 
-/// Actor that manages sequential execution of background tasks
-/// 
-/// This actor ensures that tasks execute one at a time to prevent resource contention.
-/// It's particularly useful for file I/O operations, network requests, and other
-/// expensive computations that should not run concurrently.
-/// 
-/// **Key Features**:
-/// - Sequential task execution prevents resource contention
-/// - Actor-based for thread safety (no manual locking needed)
-/// - Automatic queue management
-/// - Support for cancellation
-/// 
-/// **Performance Requirements**:
-/// - Requirement 1.4: Queue scans sequentially rather than running in parallel
-/// 
-/// **Why Sequential Execution?**
-/// Running multiple file I/O operations concurrently can cause:
-/// - Excessive disk head movement (thrashing)
-/// - Memory pressure from multiple concurrent operations
-/// - Unpredictable performance due to resource contention
-/// 
-/// Sequential execution ensures predictable, efficient resource usage.
-/// 
-/// **Usage Example**:
-/// ```swift
-/// let queue = BackgroundTaskQueue()
-/// 
-/// // Enqueue a task
-/// let result = await queue.enqueue {
-///     return await expensiveFileOperation()
-/// }
-/// 
-/// // Cancel all pending tasks
-/// await queue.cancelAll()
-/// ```
+/// FIFO execution across suspension points. Cancelled waiting callers never
+/// start their operations; running work retains ownership until it finishes.
 actor BackgroundTaskQueue {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     private var isProcessing = false
-    
-    /// Enqueue a task for sequential execution
-    /// - Parameter operation: An async closure to execute
-    /// - Returns: The result of the operation
-    /// 
-    /// **Note**: The actor itself ensures serial execution.
-    /// All calls to this method will execute sequentially, one at a time.
-    func enqueue<T>(_ operation: @escaping () async -> T) async -> T {
-        isProcessing = true
-        defer { isProcessing = false }
-        
-        // Execute and return the result
-        // The actor ensures this runs sequentially
-        return await operation()
+    private var waiters: [Waiter] = []
+
+    func enqueue<T>(_ operation: @escaping () async throws -> T) async throws -> T {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if isProcessing {
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                } else {
+                    isProcessing = true
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+        defer { releaseNext() }
+        try Task.checkCancellation()
+        return try await operation()
     }
-    
-    /// Cancel all pending tasks
+
+    /// Cancels pending work without releasing the currently running operation.
     func cancelAll() {
-        // Actor-based sequential execution means tasks are not "queued" in a traditional sense
-        // Once a task starts, it runs to completion
-        // This method is kept for API compatibility but doesn't need to do anything
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.continuation.resume(throwing: CancellationError())
+        }
     }
-    
-    /// Check if queue is currently processing tasks
-    var isCurrentlyProcessing: Bool {
-        return isProcessing
+
+    var isCurrentlyProcessing: Bool { isProcessing }
+    var pendingCount: Int { waiters.count }
+
+    private func cancelWaiter(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume(throwing: CancellationError())
+    }
+
+    private func releaseNext() {
+        if waiters.isEmpty {
+            isProcessing = false
+        } else {
+            waiters.removeFirst().continuation.resume()
+        }
     }
 }

@@ -136,13 +136,13 @@ final class PerformanceTests: XCTestCase {
         XCTAssertLessThan(smallCache.count, 20, "Some entries should be evicted")
     }
     
-    func testTaskQueueMemoryUsageWithManyTasks() async {
+    func testTaskQueueMemoryUsageWithManyTasks() async throws {
         var taskCount = 0
         let taskLimit = 100
         
         // Enqueue many tasks
         for _ in 0..<taskLimit {
-            _ = await taskQueue.enqueue {
+            _ = try await taskQueue.enqueue {
                 taskCount += 1
             }
         }
@@ -177,14 +177,14 @@ final class PerformanceTests: XCTestCase {
         XCTAssertLessThan(batchedTime, 1.0, "Batched updates should complete quickly")
     }
     
-    func testSequentialTaskExecutionReducesContextSwitches() async {
+    func testSequentialTaskExecutionReducesContextSwitches() async throws {
         var executionLog: [String] = []
         let taskCount = 50
         
         let startTime = Date()
         
         for i in 0..<taskCount {
-            _ = await taskQueue.enqueue {
+            _ = try await taskQueue.enqueue {
                 executionLog.append("task\(i)")
             }
         }
@@ -244,7 +244,7 @@ final class PerformanceTests: XCTestCase {
             let scanner = LargeFileScanner()
             let startTime = Date()
             
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             
             let elapsed = Date().timeIntervalSince(startTime)
             
@@ -279,7 +279,7 @@ final class PerformanceTests: XCTestCase {
             
             // First scan (no cache)
             let firstStart = Date()
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             let firstScan = scanner.foundFiles
             let firstTime = Date().timeIntervalSince(firstStart)
             
@@ -288,7 +288,7 @@ final class PerformanceTests: XCTestCase {
             
             // Second scan (should use cache if implemented)
             let secondStart = Date()
-            await scanner.scan()
+            await scanner.scan(at: testDir)
             let secondScan = scanner.foundFiles
             let secondTime = Date().timeIntervalSince(secondStart)
             
@@ -310,13 +310,13 @@ final class PerformanceTests: XCTestCase {
     // Test UI responsiveness during operations
     // Requirements: 1.1, 5.1, 6.2
     
-    func testUIResponsivenessDuringBackgroundOperations() async {
+    func testUIResponsivenessDuringBackgroundOperations() async throws {
         var uiUpdateCount = 0
         var backgroundTaskCount = 0
         
         // Simulate background operations
         for _ in 0..<10 {
-            _ = await taskQueue.enqueue {
+            _ = try await taskQueue.enqueue {
                 backgroundTaskCount += 1
                 // Simulate work
                 usleep(10_000) // 10ms
@@ -362,7 +362,7 @@ final class PerformanceTests: XCTestCase {
     // Requirements: 1.1, 5.1, 6.2
     
     func testCachePersistencePerformance() throws {
-        let persistence = try CachePersistence()
+        let persistence = try makeTemporaryCachePersistence()
         
         defer {
             try? persistence.clearAll()
@@ -394,7 +394,7 @@ final class PerformanceTests: XCTestCase {
     }
     
     func testCachePersistenceWithLargeData() throws {
-        let persistence = try CachePersistence()
+        let persistence = try makeTemporaryCachePersistence()
         
         defer {
             try? persistence.clearAll()
@@ -429,12 +429,12 @@ final class PerformanceTests: XCTestCase {
     
     // MARK: - Stress Tests
     
-    func testHighConcurrencyTaskExecution() async {
+    func testHighConcurrencyTaskExecution() async throws {
         var completedTasks = 0
         let taskCount = 200
         
         for _ in 0..<taskCount {
-            _ = await taskQueue.enqueue {
+            _ = try await taskQueue.enqueue {
                 completedTasks += 1
             }
         }

@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import AppKit
+import CoreWLAN
 
 struct HighMemoryApp: Identifiable {
     let id: pid_t
@@ -10,6 +11,9 @@ struct HighMemoryApp: Identifiable {
 }
 
 class SystemMonitorService: ObservableObject {
+    static let shared = SystemMonitorService()
+    private let metrics = SystemMetricsSampler()
+    private var monitoringClients = Set<String>()
     @Published var cpuUsage: Double = 0.0
     @Published var memoryUsage: Double = 0.0 // Percentage
     @Published var memoryUsedString: String = "0 GB"
@@ -33,9 +37,6 @@ class SystemMonitorService: ObservableObject {
     @Published var downloadSpeedHistory: [Double] = Array(repeating: 0, count: 20)
     @Published var uploadSpeedHistory: [Double] = Array(repeating: 0, count: 20)
     
-    private var lastBytesReceived: UInt64 = 0
-    private var lastBytesSent: UInt64 = 0
-    private var lastNetworkCheck: Date = Date()
     
     // Battery Monitoring
     @Published var batteryLevel: Double = 1.0
@@ -252,7 +253,8 @@ class SystemMonitorService: ObservableObject {
         UserDefaults.standard.set(Array(permanentlyIgnoredApps), forKey: ignoredAppsKey)
     }
     
-    func startMonitoring() {
+    func startMonitoring(client: String = "default") {
+        monitoringClients.insert(client)
         guard timer == nil else { return }
 
         scheduleUpdate()
@@ -264,7 +266,9 @@ class SystemMonitorService: ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
     }
     
-    func stopMonitoring() {
+    func stopMonitoring(client: String = "default") {
+        monitoringClients.remove(client)
+        guard monitoringClients.isEmpty else { return }
         timer?.invalidate()
         timer = nil
     }
@@ -308,40 +312,10 @@ class SystemMonitorService: ObservableObject {
             fetchUserProcesses()
         }
         
-        // CPU Usage (Simplified using top for now to avoid complex Mach calls issues in pure Swift script context initially, 
-        // but robust implementation would use host_processor_info. Let's try to parse top -l 1 output specifically designed for machine reading if possible, 
-        // or just standard parsing.)
-        // Actually, let's use a simpler bash command approach which is safer/easier to debug in this agent environment.
-        // `ps -A -o %cpu | awk '{s+=$1} END {print s}'` gives total CPU usage sum (can be > 100% on multi-core).
-        
-        let cpuTask = Process()
-        cpuTask.launchPath = "/bin/bash"
-        cpuTask.arguments = ["-c", "ps -A -o %cpu | awk '{s+=$1} END {print s}'"]
-        
-        let pipe = Pipe()
-        cpuTask.standardOutput = pipe
-        
-        do {
-            try cpuTask.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               let totalCPU = Double(output) {
-                // Normalize by core count approximately? Or just show raw. 
-                // Let's normalize by active core count to get 0-100% range typically expected by users.
-                let coreCount = Double(ProcessInfo.processInfo.activeProcessorCount)
-                let cpuUsageValue = min((totalCPU / coreCount) / 100.0, 1.0)
-                
-                // Batch CPU update
-                Task {
-                    await self.uiUpdater.batch {
-                        self.cpuUsage = cpuUsageValue
-                    }
-                }
-            }
-        } catch {
-            print("CPU Scan Error: \(error)")
+        if let usage = metrics.cpuUsage() {
+            DispatchQueue.main.async { self.cpuUsage = usage }
         }
-        
+
         // Memory Usage
         // Uses `vm_stat`
         let memTask = Process()
@@ -438,66 +412,17 @@ class SystemMonitorService: ObservableObject {
             updateBatteryDetails()
         }
         
-        // Network Speed - 使用 netstat 获取网络流量
-        // 找到 en0 接口中有实际流量的行（第7列 Ibytes > 0）
-        let netTask = Process()
-        netTask.launchPath = "/bin/bash"
-        netTask.arguments = ["-c", "netstat -ib | awk '/en0/ && $7 > 0 {print $7, $10; exit}'"]
-        
-        let netPipe = Pipe()
-        netTask.standardOutput = netPipe
-        
-        do {
-            try netTask.run()
-            let data = netPipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !output.isEmpty {
-                let parts = output.components(separatedBy: " ").filter { !$0.isEmpty }
-                if parts.count >= 2,
-                   let bytesIn = UInt64(parts[0]),
-                   let bytesOut = UInt64(parts[1]) {
-                    
-                    let now = Date()
-                    let timeDiff = now.timeIntervalSince(lastNetworkCheck)
-                    
-                    if timeDiff > 0 && lastBytesReceived > 0 {
-                        let downloadDelta = bytesIn > lastBytesReceived ? Double(bytesIn - lastBytesReceived) : 0
-                        let uploadDelta = bytesOut > lastBytesSent ? Double(bytesOut - lastBytesSent) : 0
-                        
-                        let downloadRate = downloadDelta / timeDiff
-                        let uploadRate = uploadDelta / timeDiff
-                        
-                        let totalDownloadStr = ByteCountFormatter.string(fromByteCount: Int64(bytesIn), countStyle: .file)
-                        let totalUploadStr = ByteCountFormatter.string(fromByteCount: Int64(bytesOut), countStyle: .file)
-                        
-                        // Batch network updates
-                        Task {
-                            await self.uiUpdater.batch {
-                                self.downloadSpeed = downloadRate
-                                self.uploadSpeed = uploadRate
-                                
-                                // Update Totals (Cumulative from netstat)
-                                self.totalDownload = totalDownloadStr
-                                self.totalUpload = totalUploadStr
-                                
-                                // Update History
-                                self.downloadSpeedHistory.removeFirst()
-                                self.downloadSpeedHistory.append(downloadRate)
-                                self.uploadSpeedHistory.removeFirst()
-                                self.uploadSpeedHistory.append(uploadRate)
-                            }
-                        }
-                    }
-                    
-                    lastBytesReceived = bytesIn
-                    lastBytesSent = bytesOut
-                    lastNetworkCheck = now
-                }
+        if let traffic = metrics.networkUsage() {
+            DispatchQueue.main.async {
+                self.downloadSpeed = traffic.download
+                self.uploadSpeed = traffic.upload
+                self.totalDownload = ByteCountFormatter.string(fromByteCount: Int64(clamping: traffic.received), countStyle: .file)
+                self.totalUpload = ByteCountFormatter.string(fromByteCount: Int64(clamping: traffic.sent), countStyle: .file)
+                self.downloadSpeedHistory = Array((self.downloadSpeedHistory + [traffic.download]).suffix(20))
+                self.uploadSpeedHistory = Array((self.uploadSpeedHistory + [traffic.upload]).suffix(20))
             }
-        } catch {
-            print("Network Scan Error: \(error)")
         }
-        
+
         if shouldRefreshApplications {
             fetchWiFiInfo()
             updateBatteryStatus()
@@ -505,44 +430,13 @@ class SystemMonitorService: ObservableObject {
         updateConnectionDuration()
     }
     
-    // Fetch WiFi Info using airport utility
     private func fetchWiFiInfo() {
-        let task = Process()
-        task.launchPath = "/bin/bash"
-        // Use standard path for airport utility on macOS
-        task.arguments = ["-c", "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I | awk -F': ' '/ SSID/ {print $2}'"]
-        
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
-                Task {
-                    await uiUpdater.batch {
-                        self.wifiSSID = output
-                    }
-                }
-            } else {
-                 Task {
-                    await uiUpdater.batch {
-                        self.wifiSSID = LocalizationManager.shared.text(
-                            simplifiedChinese: "Wi-Fi 未连接",
-                            traditionalChinese: "Wi-Fi 未連線",
-                            english: "Wi-Fi Not Connected",
-                            japanese: "Wi-Fi未接続",
-                            korean: "Wi-Fi 연결 안 됨",
-                            russian: "Wi-Fi не подключён"
-                        )
-                    }
-                }
-            }
-        } catch {
-             // Fallback
+        let ssid = CWWiFiClient.shared().interface()?.ssid()
+        DispatchQueue.main.async {
+            self.wifiSSID = ssid ?? LocalizationManager.shared.text("无法获取 Wi-Fi 信息", "Wi-Fi Information Unavailable")
         }
     }
-    
+
     private func updateConnectionDuration() {
         let duration = Date().timeIntervalSince(connectionStartTime)
         let hours = Int(duration) / 3600

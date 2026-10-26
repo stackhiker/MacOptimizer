@@ -469,7 +469,7 @@ struct AIAssistantSettingsView: View {
 
                 settingsField(
                     title: "API Key",
-                    detail: t("配置保存在普通明文 JSON 文件中，不使用钥匙串", "設定儲存在普通明文 JSON 檔案中，不使用鑰匙圈", "Settings are stored in a regular plain-text JSON file; Keychain is not used", "設定は通常のプレーンテキストJSONファイルに保存され、キーチェーンは使用しません", "설정은 일반 텍스트 JSON 파일에 저장되며 키체인을 사용하지 않습니다", "Настройки хранятся в обычном открытом JSON-файле; Связка ключей не используется"),
+                    detail: t("API Key 保存在系统钥匙串中", "API Key 儲存在系統鑰匙圈中", "API keys are stored in the system Keychain", "APIキーはシステムのキーチェーンに保存されます", "API 키는 시스템 키체인에 저장됩니다", "API-ключи хранятся в системной Связке ключей"),
                     content: AnyView(
                         SecureField("••••••••••••", text: $apiKey)
                             .textFieldStyle(.plain)
@@ -593,7 +593,10 @@ struct AIAssistantSettingsView: View {
         baseURL = configuration.baseURL
         apiKey = configuration.apiKey
         model = configuration.model
-        statusMessage = ""
+        statusIsError = store.credentialStorageFailed
+        statusMessage = store.credentialStorageFailed
+            ? loc.text("无法访问钥匙串，原配置已保留。请解锁钥匙串后重试保存。", "Keychain is unavailable. Your original settings were retained. Unlock Keychain and save again.")
+            : ""
     }
 
     private func save() {
@@ -605,7 +608,7 @@ struct AIAssistantSettingsView: View {
             onSaved?()
         } catch {
             statusIsError = true
-            statusMessage = t("无法写入 AI 配置文件", "無法寫入 AI 設定檔", "Could not write the AI configuration file", "AI設定ファイルに書き込めませんでした", "AI 설정 파일에 쓸 수 없습니다", "Не удалось записать файл конфигурации ИИ")
+            statusMessage = t("无法保存 AI 配置或访问钥匙串", "無法寫入 AI 設定檔", "Could not save AI settings or access Keychain", "AI設定ファイルに書き込めませんでした", "AI 설정 파일에 쓸 수 없습니다", "Не удалось записать файл конфигурации ИИ")
         }
     }
 

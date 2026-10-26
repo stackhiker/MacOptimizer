@@ -13,15 +13,15 @@
   <img src="https://img.shields.io/badge/Swift-5.9-orange.svg" alt="Swift">
   <img src="https://img.shields.io/badge/SwiftUI-4.0-purple.svg" alt="SwiftUI">
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License">
-  <img src="https://img.shields.io/badge/version-2.2.0-brightgreen.svg" alt="Version">
-  <img src="https://img.shields.io/badge/i18n-EN%20%7C%20中文-cyan.svg" alt="i18n">
+  <img src="https://img.shields.io/badge/version-5.0-brightgreen.svg" alt="Version">
+  <img src="https://img.shields.io/badge/i18n-6%20languages-cyan.svg" alt="i18n">
 </p>
 
 ---
 
 ## ✨ Features
 
-MacOptimizer is a system optimization tool designed specifically for macOS, featuring a modern SwiftUI interface with eight core functional modules:
+MacOptimizer is a system optimization tool designed specifically for macOS, featuring a modern SwiftUI interface with the following core modules:
 
 特别推出AI影视与设计平台，专注于AI短剧，AI设计智能体平台。体验地址：https://zaomeng.art
 
@@ -211,10 +211,10 @@ MacOptimizer/
 
 - [x] Multi-language support (English/中文)
 - [ ] Scheduled cleanup tasks
-- [ ] Menu bar widget
-- [ ] App update detection
+- [x] Menu bar widget
+- [x] App update detection
 - [ ] Duplicate file finder
-- [ ] Privacy protection (browsing history cleanup)
+- [x] Privacy protection (browsing history cleanup)
 
 ---
 
@@ -255,7 +255,7 @@ This project is open source under the [MIT License](LICENSE).
 
 ## ✨ 功能特性
 
-Mac优化大师是一款专为 macOS 设计的系统优化工具，采用现代化的 SwiftUI 界面，提供八大核心功能模块：
+Mac优化大师是一款专为 macOS 设计的系统优化工具，采用现代化的 SwiftUI 界面，提供以下核心功能模块：
 
 ### 🌐 多语言支持（新功能！）
 - **中英双语** - 一键切换界面语言

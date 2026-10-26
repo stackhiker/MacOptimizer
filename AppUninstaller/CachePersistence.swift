@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Handles disk persistence for cache data
 class CachePersistence {
@@ -8,19 +9,23 @@ class CachePersistence {
     
     /// Initialize cache persistence
     /// - Throws: If cache directory cannot be created
-    init() throws {
-        // Use Application Support directory for cache
-        let appSupportURL = try fileManager.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        
-        self.cacheDirectory = appSupportURL.appendingPathComponent("AppUninstaller/Cache", isDirectory: true)
+    init(cacheDirectory: URL? = nil) throws {
+        if let cacheDirectory {
+            self.cacheDirectory = cacheDirectory.standardizedFileURL
+        } else {
+            // Use Application Support for the app, while allowing tests and
+            // callers to inject an isolated directory.
+            let appSupportURL = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            self.cacheDirectory = appSupportURL.appendingPathComponent("AppUninstaller/Cache", isDirectory: true)
+        }
         
         // Create cache directory if it doesn't exist
-        try fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
     }
     
     /// Save cache data to disk
@@ -110,14 +115,13 @@ class CachePersistence {
     // MARK: - Private Helpers
     
     private func sanitizeKey(_ key: String) -> String {
-        // Create a safe filename from the key
-        let data = key.data(using: .utf8) ?? Data()
-        let hash = data.withUnsafeBytes { buffer in
-            var hasher = Hasher()
-            hasher.combine(bytes: buffer)
-            return abs(hasher.finalize())
-        }
-        return "cache_\(hash).json"
+        // Swift's Hasher is intentionally randomized per process, so it cannot
+        // be used for persistent filenames. SHA-256 is deterministic and keeps
+        // arbitrary cache keys out of the filesystem path.
+        let digest = SHA256.hash(data: Data(key.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "cache_\(digest).json"
     }
 }
 

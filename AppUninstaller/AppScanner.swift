@@ -45,7 +45,12 @@ class AppScanner: NSObject, ObservableObject {
 
     /// Reuse one scanner so its five-minute result cache survives row scans and
     /// module switches instead of being discarded for every application.
-    private let residualScanner = ResidualFileScanner()
+    private let residualScanner: ResidualFileScanner
+
+    init(residualScanner: ResidualFileScanner = ResidualFileScanner()) {
+        self.residualScanner = residualScanner
+        super.init()
+    }
     
     /// Monitors operation performance and identifies bottlenecks
     /// Logs warnings for operations exceeding 500ms threshold
@@ -85,7 +90,7 @@ class AppScanner: NSObject, ObservableObject {
         
         // Perform all I/O and processing on background thread
         // This prevents blocking the main thread and keeps UI responsive
-        let scannedApps = await taskQueue.enqueue { [weak self] in
+        let scannedApps: [InstalledApp] = (try? await taskQueue.enqueue { [weak self] in
             guard let self = self else { return [InstalledApp]() }
             
             var scannedApps: [InstalledApp] = []
@@ -126,7 +131,7 @@ class AppScanner: NSObject, ObservableObject {
             // Remove duplicates and sort
             let uniqueApps = Array(Set(scannedApps))
             return uniqueApps.sorted { $0.name < $1.name }
-        }
+        }) ?? []
         
         // Single MainActor call to update UI
         // This reduces context switches from potentially 100+ to just 1
@@ -208,7 +213,7 @@ class AppScanner: NSObject, ObservableObject {
         
         // Calculate size on background thread
         // This prevents blocking the main thread
-        let size = await taskQueue.enqueue {
+        let size = await Task.detached(priority: .utility) {
             
             let fileManager = FileManager.default
             var size: Int64 = 0
@@ -228,7 +233,7 @@ class AppScanner: NSObject, ObservableObject {
             }
             
             return size
-        }
+        }.value
         
         // Cache the result for 5 minutes (300 seconds)
         // This allows the cache to be reused for repeated operations
@@ -254,6 +259,19 @@ class AppScanner: NSObject, ObservableObject {
     func removeFromList(app: InstalledApp) async {
         await uiUpdater.batch {
             self.apps.removeAll { $0.id == app.id }
+        }
+    }
+
+    /// Reconcile successful paths immediately, while keeping failed and
+    /// unselected residuals available for a later attempt.
+    @MainActor
+    func applyRemovalResult(_ result: RemovalResult, to app: InstalledApp) {
+        residualScanner.invalidateCache(for: app)
+        sizeCache.invalidate(app.path.path)
+        let completed = Set(result.completedPaths.map { $0.standardizedFileURL.path })
+        app.residualFiles.removeAll { completed.contains($0.path.standardizedFileURL.path) }
+        if result.appRemoved {
+            apps.removeAll { $0.id == app.id }
         }
     }
     

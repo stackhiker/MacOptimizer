@@ -1,14 +1,18 @@
 import XCTest
+import CryptoKit
 @testable import AppUninstaller
 
 final class CachePersistenceTests: XCTestCase {
     
     var persistence: CachePersistence!
+    var testDirectory: URL!
     
     override func setUp() {
         super.setUp()
         do {
-            persistence = try CachePersistence()
+            testDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MacOptimizerCachePersistenceTests-\(UUID().uuidString)", isDirectory: true)
+            persistence = try CachePersistence(cacheDirectory: testDirectory)
         } catch {
             XCTFail("Failed to initialize CachePersistence: \(error)")
         }
@@ -16,11 +20,14 @@ final class CachePersistenceTests: XCTestCase {
     
     override func tearDown() {
         do {
-            try persistence?.clearAll()
+            if let testDirectory {
+                try? FileManager.default.removeItem(at: testDirectory)
+            }
         } catch {
             print("Failed to clear cache: \(error)")
         }
         persistence = nil
+        testDirectory = nil
         super.tearDown()
     }
     
@@ -33,6 +40,15 @@ final class CachePersistenceTests: XCTestCase {
         let loaded = try persistence.load([String: String].self, forKey: "testData")
         
         XCTAssertEqual(loaded, testData, "Should save and load data correctly")
+    }
+
+    func testPersistentFilenameUsesStableSHA256Digest() throws {
+        try persistence.save(["value"], forKey: "cache_data")
+        let digest = SHA256.hash(data: Data("cache_data".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let expected = testDirectory.appendingPathComponent("cache_\(digest).json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: expected.path))
     }
     
     func testLoadNonexistentKey() throws {

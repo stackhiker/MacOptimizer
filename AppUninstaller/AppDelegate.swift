@@ -9,9 +9,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Match the locally installed CleanMyMac X primary content size.
-        // Apply it after SwiftUI has created the WindowGroup window.
+        // Apply it after SwiftUI has created the unique main window.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            guard let window = NSApp.windows.first else { return }
+            guard let window = NSApp.windows.first(where: {
+                !($0 is MenuBarWindow) && $0.styleMask.contains(.titled)
+            }) else { return }
+            MenuBarManager.shared.registerMainWindow(window)
+            window.isRestorable = false
             window.minSize = NSSize(width: 980, height: 600)
             window.setContentSize(NSSize(width: 1090, height: 672))
             window.isOpaque = true
@@ -31,6 +35,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MenuBarManager.shared.openMainApp()
         return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MenuBarManager.shared.removeStatusItem()
     }
 }
