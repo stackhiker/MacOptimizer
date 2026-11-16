@@ -150,6 +150,13 @@ struct SettingsView: View {
             if let error = updateService.errorMessage {
                 Text(error).font(.caption).foregroundColor(.orange).textSelection(.enabled)
             }
+            if let source = updateService.sourceText {
+                Text(source).font(.caption).foregroundColor(.secondary)
+            }
+            if let retry = updateService.apiRetryAt, retry > Date() {
+                Text(loc.text("GitHub 接口限流，暂停请求至：", "GitHub API rate limited; paused until: ") + retry.formatted(date: .abbreviated, time: .standard))
+                    .font(.caption).foregroundColor(.secondary)
+            }
             if let checked = updateService.checkedAt {
                 Text(loc.text("上次成功检查：", "Last successful check: ") + checked.formatted(date: .abbreviated, time: .standard))
                     .font(.caption).foregroundColor(.secondary)
