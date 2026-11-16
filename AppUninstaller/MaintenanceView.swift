@@ -16,26 +16,26 @@ enum MaintenanceTask: String, CaseIterable, Identifiable {
     
     var title: String {
         switch self {
-        case .freeRam: return "释放 RAM"
-        case .purgeableSpace: return "释放可清除空间"
+        case .freeRam: return "检查内存压力"
+        case .purgeableSpace: return "清理旧缓存文件"
         case .flushDns: return "刷新 DNS 缓存"
         case .speedUpMail: return "加速邮件"
         case .rebuildSpotlight: return "为“聚焦”重建索引"
-        case .repairPermissions: return "修复磁盘权限"
-        case .repairApps: return "修复应用程序"
+        case .repairPermissions: return "检查目录访问权限"
+        case .repairApps: return "清理旧崩溃报告"
         case .timeMachine: return "时间机器快照瘦身"
         }
     }
     
     var englishTitle: String {
         switch self {
-        case .freeRam: return "Free RAM"
-        case .purgeableSpace: return "Free Purgeable Space"
+        case .freeRam: return "Check Memory Pressure"
+        case .purgeableSpace: return "Clean Old Cache Files"
         case .flushDns: return "Flush DNS Cache"
         case .speedUpMail: return "Speed Up Mail"
         case .rebuildSpotlight: return "Reindex Spotlight"
-        case .repairPermissions: return "Repair Disk Permissions"
-        case .repairApps: return "Repair Applications"
+        case .repairPermissions: return "Check Directory Access"
+        case .repairApps: return "Clean Old Crash Reports"
         case .timeMachine: return "Thin Time Machine Snapshots"
         }
     }
@@ -70,9 +70,9 @@ enum MaintenanceTask: String, CaseIterable, Identifiable {
     var description: String {
         switch self {
         case .freeRam:
-            return "您的 Mac 的内存经常被占满。这会让您的应用和打开的文件反应很慢。MacOptimizer 可以帮助您的系统将所有不使用的数据从内存中清理出去，从而为当前需要的应用腾出空间。"
+            return "查看内存占用、压缩、交换和系统压力。需要降低占用时，可在“优化”中选择并退出不需要的应用。"
         case .purgeableSpace:
-            return "您的 Mac 可能会增加大量它认为可以清除的文件，仍将它们保留在磁盘上。这些数据是不需要的。但只有在系统需要大量可用空间的时候才会被释放。如果您现在已经需要该空间，只需点按一下即可将其释放。"
+            return "将 30 天未修改且未访问的普通缓存、临时和日志文件移到废纸篓。跳过运行中应用和系统缓存；清空废纸篓后才会释放磁盘空间。"
         case .flushDns:
             return "macOS 会将解析的 DNS（域名系统）查询的本地缓存保留一段时间。有时候可能需要立即重置缓存，例如在服务器更改后。"
         case .speedUpMail:
@@ -82,7 +82,7 @@ enum MaintenanceTask: String, CaseIterable, Identifiable {
         case .repairPermissions:
             return "验证并立即修复系统内损坏的文件和文件夹权限，确保应用程序可以正常运行。经常用于解决各种访问相关的问题。"
         case .repairApps:
-            return "扫描并修复崩溃的应用程序。清理损坏的缓存和临时文件，重置应用权限，帮助应用恢复正常运行。"
+            return "将 30 天未修改且未访问的崩溃报告移到废纸篓，保留应用保存状态和容器数据。此操作不会修复应用程序本身。"
         case .timeMachine:
             return "macOS 会创建本地时间机器快照占用磁盘空间。如果您不需要这些快照，可以删除它们来释放空间。"
         }
@@ -91,9 +91,9 @@ enum MaintenanceTask: String, CaseIterable, Identifiable {
     var englishDescription: String {
         switch self {
         case .freeRam:
-            return "Your Mac's memory is often full. This makes apps and files slow to respond. MacOptimizer can help clear unused data from memory to make room for apps you need."
+            return "Inspect memory use, compression, swap and system pressure. Use Optimization to choose unneeded applications to quit."
         case .purgeableSpace:
-            return "Your Mac may keep files it considers purgeable on disk. These are not needed but only released when space is required. Click to release them now."
+            return "Move regular cache, temporary and log files untouched for 30 days to Trash. Running applications and system caches are skipped. Disk space is released only after emptying Trash."
         case .flushDns:
             return "macOS caches DNS queries locally. Sometimes you need to reset this cache immediately, for example after server changes."
         case .speedUpMail:
@@ -103,7 +103,7 @@ enum MaintenanceTask: String, CaseIterable, Identifiable {
         case .repairPermissions:
             return "Verify and repair broken file permissions to ensure apps run correctly. Often used to solve access-related issues."
         case .repairApps:
-            return "Scan and repair crashed applications. Clean corrupted caches and temp files, reset app permissions to help apps run normally."
+            return "Move crash reports untouched for 30 days to Trash. Saved application states and container data are preserved; this does not repair applications."
         case .timeMachine:
             return "macOS creates local Time Machine snapshots that use disk space. Delete them if you don't need them."
         }
@@ -156,53 +156,66 @@ enum MaintenanceTask: String, CaseIterable, Identifiable {
         case .chinese: return title
         case .traditionalChinese:
             switch self {
-            case .freeRam: return "釋放 RAM"
-            case .purgeableSpace: return "釋放可清除空間"
+            case .freeRam: return "檢查記憶體壓力"
+            case .purgeableSpace: return "清理舊快取檔案"
             case .flushDns: return "清除 DNS 快取"
             case .speedUpMail: return "加速郵件"
             case .rebuildSpotlight: return "重建 Spotlight 索引"
-            case .repairPermissions: return "修復磁碟權限"
-            case .repairApps: return "修復應用程式"
+            case .repairPermissions: return "檢查目錄存取權限"
+            case .repairApps: return "清理舊當機報告"
             case .timeMachine: return "精簡 Time Machine 快照"
             }
         case .english: return englishTitle
         case .japanese:
             switch self {
-            case .freeRam: return "RAMを解放"
-            case .purgeableSpace: return "消去可能領域を解放"
+            case .freeRam: return "メモリ負荷を確認"
+            case .purgeableSpace: return "古いキャッシュを整理"
             case .flushDns: return "DNSキャッシュを消去"
             case .speedUpMail: return "メールを高速化"
             case .rebuildSpotlight: return "Spotlightのインデックスを再作成"
-            case .repairPermissions: return "ディスクアクセス権を修復"
-            case .repairApps: return "アプリケーションを修復"
+            case .repairPermissions: return "フォルダのアクセス権を確認"
+            case .repairApps: return "古いクラッシュレポートを整理"
             case .timeMachine: return "Time Machineスナップショットを整理"
             }
         case .korean:
             switch self {
-            case .freeRam: return "RAM 확보"
-            case .purgeableSpace: return "제거 가능한 공간 확보"
+            case .freeRam: return "메모리 압력 확인"
+            case .purgeableSpace: return "오래된 캐시 정리"
             case .flushDns: return "DNS 캐시 지우기"
             case .speedUpMail: return "Mail 속도 향상"
             case .rebuildSpotlight: return "Spotlight 색인 재구성"
-            case .repairPermissions: return "디스크 권한 복구"
-            case .repairApps: return "애플리케이션 복구"
+            case .repairPermissions: return "폴더 접근 권한 확인"
+            case .repairApps: return "오래된 충돌 보고서 정리"
             case .timeMachine: return "Time Machine 스냅샷 정리"
             }
         case .russian:
             switch self {
-            case .freeRam: return "Освободить ОЗУ"
-            case .purgeableSpace: return "Освободить очищаемое место"
+            case .freeRam: return "Проверить нагрузку на память"
+            case .purgeableSpace: return "Очистить старый кэш"
             case .flushDns: return "Очистить кэш DNS"
             case .speedUpMail: return "Ускорить Почту"
             case .rebuildSpotlight: return "Переиндексировать Spotlight"
-            case .repairPermissions: return "Исправить права доступа"
-            case .repairApps: return "Восстановить приложения"
+            case .repairPermissions: return "Проверить доступ к папкам"
+            case .repairApps: return "Очистить старые отчёты о сбоях"
             case .timeMachine: return "Очистить снимки Time Machine"
             }
         }
     }
 
+    private func scopedDescription(for language: AppLanguage) -> String? {
+        let values: [AppLanguage: String]
+        switch self {
+        case .freeRam: values = [.chinese: "查看内存占用、压缩、交换和系统压力。需要降低占用时，可在“优化”中选择并退出不需要的应用。", .traditionalChinese: "檢查記憶體用量、壓縮、交換空間與系統壓力。需要降低用量時，可在「最佳化」中選擇並結束不需要的應用程式。", .english: "Inspect memory use, compression, swap and system pressure. Use Optimization to choose unneeded applications to quit.", .japanese: "メモリ使用量、圧縮、スワップ、システムの負荷を確認します。使用量を減らすには「最適化」で不要なアプリを選択して終了します。", .korean: "메모리 사용량, 압축, 스왑 및 시스템 압력을 확인합니다. 사용량을 줄이려면 최적화에서 불필요한 앱을 선택하여 종료하세요.", .russian: "Проверьте использование памяти, сжатие, подкачку и нагрузку. В разделе «Оптимизация» можно выбрать ненужные приложения и завершить их."]
+        case .purgeableSpace: values = [.chinese: "将 30 天未修改且未访问的普通缓存、临时和日志文件移到废纸篓。跳过运行中应用和系统缓存；清空废纸篓后才会释放磁盘空间。", .traditionalChinese: "將 30 天未修改且未存取的一般快取、暫存與記錄檔移到垃圾桶。略過執行中的應用程式與系統快取；清空垃圾桶後才會釋放磁碟空間。", .english: "Move regular cache, temporary and log files untouched for 30 days to Trash. Running applications and system caches are skipped. Disk space is released only after emptying Trash.", .japanese: "30日間変更・アクセスされていない通常のキャッシュ、一時ファイル、ログをゴミ箱へ移動します。実行中のアプリとシステムキャッシュは除外し、容量はゴミ箱を空にした後に解放されます。", .korean: "30일 동안 수정하거나 접근하지 않은 일반 캐시, 임시 파일 및 로그를 휴지통으로 옮깁니다. 실행 중인 앱과 시스템 캐시는 건너뛰며 휴지통을 비운 후 공간이 확보됩니다.", .russian: "Переместите в Корзину обычные файлы кэша, временные файлы и журналы, не изменявшиеся и не использовавшиеся 30 дней. Кэш запущенных приложений и системы пропускается. Место освободится после очистки Корзины."]
+        case .repairApps: values = [.chinese: "将 30 天未修改且未访问的崩溃报告移到废纸篓，保留应用保存状态和容器数据。此操作不会修复应用程序本身。", .traditionalChinese: "將 30 天未修改且未存取的當機報告移到垃圾桶，保留應用程式儲存狀態與容器資料。此操作不會修復應用程式本身。", .english: "Move crash reports untouched for 30 days to Trash. Saved application states and container data are preserved; this does not repair applications.", .japanese: "30日間変更・アクセスされていないクラッシュレポートをゴミ箱へ移動します。アプリの保存状態とコンテナデータは保持されます。アプリ自体を修復する操作ではありません。", .korean: "30일 동안 수정하거나 접근하지 않은 충돌 보고서를 휴지통으로 옮깁니다. 앱의 저장 상태와 컨테이너 데이터는 유지되며 앱 자체를 복구하지는 않습니다.", .russian: "Переместите в Корзину отчёты о сбоях, не изменявшиеся и не использовавшиеся 30 дней. Сохранённое состояние приложений и данные контейнеров сохраняются. Это не восстанавливает сами приложения."]
+        case .repairPermissions: values = [.chinese: "检查常用用户目录是否可读写，保留现有权限设置。", .traditionalChinese: "檢查常用使用者目錄是否可讀寫，保留現有權限設定。", .english: "Check access to common user directories while preserving existing permissions.", .japanese: "一般的なユーザーフォルダの読み書き権限を確認し、現在の権限設定は保持します。", .korean: "일반 사용자 폴더의 읽기 및 쓰기 접근을 확인하고 기존 권한 설정은 유지합니다.", .russian: "Проверьте доступ на чтение и запись к пользовательским папкам, сохранив текущие права."]
+        default: return nil
+        }
+        return values[language]
+    }
+
     func localizedDescription(for language: AppLanguage) -> String {
+        if let scoped = scopedDescription(for: language) { return scoped }
         switch language {
         case .chinese: return description
         case .english: return englishDescription
@@ -254,6 +267,10 @@ enum MaintenanceTask: String, CaseIterable, Identifiable {
     }
 
     func localizedRecommendations(for language: AppLanguage) -> [String] {
+        if self == .freeRam || self == .purgeableSpace || self == .repairApps || self == .repairPermissions {
+            let values: [AppLanguage: String] = [.chinese: "查看实际结果并按需处理", .traditionalChinese: "查看實際結果並視需要處理", .english: "Review actual results before taking further action", .japanese: "実際の結果を確認して必要な操作を行ってください", .korean: "실제 결과를 확인하고 필요한 조치를 선택하세요", .russian: "Проверьте результаты перед дальнейшими действиями"]
+            return [values[language] ?? ""]
+        }
         switch language {
         case .chinese: return recommendations
         case .english: return englishRecommendations
@@ -339,7 +356,11 @@ class MaintenanceService: ObservableObject {
     @Published var timeMachineSnapshots: [String] = []
     @Published var showSnapshotSelector = false
     
-    private init() {}
+    private let taskExecutor: (@MainActor (MaintenanceTask) async -> TaskResult)?
+
+    init(taskExecutor: (@MainActor (MaintenanceTask) async -> TaskResult)? = nil) {
+        self.taskExecutor = taskExecutor
+    }
     
     func getLastRunDate(for task: MaintenanceTask, language: AppLanguage) -> String {
         if let date = UserDefaults.standard.object(forKey: task.lastRunKey) as? Date {
@@ -401,17 +422,31 @@ class MaintenanceService: ObservableObject {
     }
     
     // MARK: - Run Tasks
+    @MainActor
     func runSelectedTasks() async {
-        await MainActor.run {
-            isRunning = true
-            runWasCancelled = false
-            completedTasks = []
-            taskResults = []
+        guard !isRunning, !Task.isCancelled else { return }
+        // Claim ownership before the first suspension; another UI/agent request
+        // must not reset cancellation or confirmations for the running batch.
+        isRunning = true
+        runWasCancelled = false
+        completedTasks = []
+        taskResults = []
+        userConfirmed = false
+        showConfirmDialog = false
+        confirmDialogTask = nil
+        let tasksToRun = selectedTasks
+        defer {
+            if Task.isCancelled { runWasCancelled = true }
+            currentRunningTask = nil
+            showConfirmDialog = false
+            confirmDialogTask = nil
+            userConfirmed = false
+            isRunning = false
         }
         
         for task in MaintenanceTask.allCases {
             if runWasCancelled || Task.isCancelled { break }
-            if selectedTasks.contains(task) {
+            if tasksToRun.contains(task) {
                 await MainActor.run { currentRunningTask = task }
                 
                 // 检查是否需要用户确认
@@ -419,11 +454,11 @@ class MaintenanceService: ObservableObject {
                     await requestConfirmation(for: task)
                     
                     // 等待用户确认
-                    var waitTime = 0
-                    while showConfirmDialog && waitTime < 30 {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)
-                        waitTime += 1
+                    while showConfirmDialog && !runWasCancelled && !Task.isCancelled {
+                        do { try await Task.sleep(nanoseconds: 100_000_000) }
+                        catch { await MainActor.run { cancelAction() }; break }
                     }
+                    if runWasCancelled || Task.isCancelled { break }
                     
                     // 如果用户取消，跳过此任务
                     if !userConfirmed {
@@ -446,28 +481,29 @@ class MaintenanceService: ObservableObject {
                 if runWasCancelled || Task.isCancelled { break }
                 
                 await MainActor.run {
-                    completedTasks.insert(task)
+                    if result.success {
+                        completedTasks.insert(task)
+                        UserDefaults.standard.set(Date(), forKey: task.lastRunKey)
+                    }
                     taskResults.append(result)
-                    UserDefaults.standard.set(Date(), forKey: task.lastRunKey)
                 }
             }
         }
         
-        await MainActor.run {
-            currentRunningTask = nil
-            isRunning = false
-        }
     }
 
+    @MainActor
     func stopRunningTasks() {
+        guard isRunning else { return }
         runWasCancelled = true
+        userConfirmed = false
         showConfirmDialog = false
     }
     
     // 检查任务是否需要用户确认
     private func needsConfirmation(_ task: MaintenanceTask) -> Bool {
         switch task {
-        case .repairApps, .timeMachine:
+        case .repairApps, .purgeableSpace, .timeMachine:
             return true  // 高风险操作需要确认
         default:
             return false
@@ -481,7 +517,9 @@ class MaintenanceService: ObservableObject {
         let message: String
         switch task {
         case .repairApps:
-            message = loc.text("此操作将清理所有应用的保存状态和崩溃日志。这是安全的，但某些应用可能需要重新登录。", "This will clean saved states and crash logs for all apps. It is safe, but some apps may require you to sign in again.")
+            message = loc.text("将 30 天未修改且未访问的崩溃报告移到废纸篓。应用数据和保存状态会保留。", "Move crash reports untouched for 30 days to Trash. Application data and saved states are kept.")
+        case .purgeableSpace:
+            message = loc.text("将符合规则的旧缓存文件移到废纸篓，跳过系统缓存和运行中的应用。需要清空废纸篓才会释放空间。", "Move eligible old cache files to Trash, skipping system caches and running apps. Empty Trash later to release space.")
         case .timeMachine:
             message = loc.text("此操作将删除所有旧的 Time Machine 快照（保留最新的一个）。这会释放磁盘空间，但无法撤销。", "This will delete all old Time Machine snapshots while keeping the latest one. It will free disk space and cannot be undone.")
         default:
@@ -495,18 +533,22 @@ class MaintenanceService: ObservableObject {
     }
     
     // 用户确认操作
+    @MainActor
     func confirmAction() {
+        guard isRunning, showConfirmDialog, !runWasCancelled else { return }
         userConfirmed = true
         showConfirmDialog = false
     }
     
     // 用户取消操作
+    @MainActor
     func cancelAction() {
         userConfirmed = false
         showConfirmDialog = false
     }
     
     private func executeTask(_ task: MaintenanceTask) async -> TaskResult {
+        if let taskExecutor { return await taskExecutor(task) }
         let result: (success: Bool, message: String, details: String?)
         
         switch task {
@@ -536,228 +578,78 @@ class MaintenanceService: ObservableObject {
         )
     }
     
-    // MARK: - 释放 RAM (使用 purge 命令)
+    // MARK: - Memory inspection
     private func freeRAM() async -> (success: Bool, message: String, details: String?) {
         let loc = LocalizationManager.shared
-        // 获取执行前的内存使用情况
-        let beforeMemory = getMemoryUsage()
-        
-        // 方法1: 使用 memory_pressure 触发内存回收
-        let memPressure = Process()
-        memPressure.executableURL = URL(fileURLWithPath: "/usr/bin/memory_pressure")
-        memPressure.arguments = ["-l", "critical"]
-        try? memPressure.run()
-        
-        // 等待2秒让系统响应
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        memPressure.terminate()
-        
-        // 方法2: 尝试使用 purge (可能需要开发者工具)
-        let purge = Process()
-        purge.executableURL = URL(fileURLWithPath: "/usr/sbin/purge")
-        try? purge.run()
-        purge.waitUntilExit()
-        
-        // 等待一下让系统更新内存统计
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        
-        // 获取执行后的内存使用情况
-        let afterMemory = getMemoryUsage()
-        let freedMemoryGB = max(0, beforeMemory - afterMemory)
-        
-        if freedMemoryGB > 0.1 {
-            return (true, loc.text("已释放 \(String(format: "%.2f", freedMemoryGB)) GB 内存", "Freed \(String(format: "%.2f", freedMemoryGB)) GB of memory"), loc.text("内存压力已降低", "Memory pressure has been reduced"))
-        } else {
-            return (true, loc.text("内存优化完成", "Memory Optimization Complete"), loc.text("系统已有充足的可用内存", "The system already has sufficient available memory"))
+        guard let snapshot = MemorySnapshot.read() else {
+            return (false, loc.text("无法读取内存状态", "Memory Status Unavailable"), nil)
         }
+        let used = ByteCountFormatter.string(fromByteCount: Int64(snapshot.usedBytes), countStyle: .memory)
+        let compressed = ByteCountFormatter.string(fromByteCount: Int64(snapshot.compressedBytes), countStyle: .memory)
+        let swap = snapshot.swapUsedBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) } ?? "—"
+        return (true, loc.text("内存检查完成；压力：", "Memory checked; pressure: ") + snapshot.pressure.title(loc),
+                loc.text("已用 \(used)，压缩 \(compressed)，交换 \(swap)。可在“优化”中选择不需要的应用并退出。", "Used \(used), compressed \(compressed), swap \(swap). Choose unneeded applications to quit in Optimization."))
     }
-    
-    // 获取内存使用情况（GB）
-    private func getMemoryUsage() -> Double {
-        var stats = vm_statistics64()
-        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)
-        
-        let result = withUnsafeMutablePointer(to: &stats) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
-            }
-        }
-        
-        guard result == KERN_SUCCESS else { return 0 }
-        
-        let pageSize = Double(vm_kernel_page_size)
-        let usedMemory = Double(stats.active_count + stats.wire_count) * pageSize
-        return usedMemory / (1024 * 1024 * 1024) // Convert to GB
-    }
-    
-    // MARK: - 释放可清除空间
+
     private func freePurgeableSpace() async -> (success: Bool, message: String, details: String?) {
+        let cacheRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches")
+        return await cleanMaintenanceFiles(root: cacheRoot, kind: .cache)
+    }
+
+    private func cleanMaintenanceFiles(root: URL, kind: MaintenanceFileCleaner.Kind) async -> (success: Bool, message: String, details: String?) {
         let loc = LocalizationManager.shared
-        var totalCleaned: Int64 = 0
-        var filesDeleted = 0
-        
-        // 1. 清理系统临时文件
-        let tempDirs = [
-            FileManager.default.temporaryDirectory.path,
-            "/private/var/folders"
-        ]
-        
-        for dir in tempDirs {
-            if let (size, count) = getDirectorySize(dir, olderThanDays: 7) {
-                let cleanup = Process()
-                cleanup.executableURL = URL(fileURLWithPath: "/usr/bin/find")
-                cleanup.arguments = [dir, "-type", "f", "-atime", "+7", "-delete"]
-                try? cleanup.run()
-                cleanup.waitUntilExit()
-                
-                totalCleaned += size
-                filesDeleted += count
-            }
+        let cleaner = MaintenanceFileCleaner(isOwnerRunning: { owner in
+            NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == owner }
+        })
+        let result = cleaner.clean(root: root, kind: kind, isCancelled: { self.runWasCancelled || Task.isCancelled })
+        let size = ByteCountFormatter.string(fromByteCount: result.movedBytes, countStyle: .file)
+        let message = loc.text("已将 \(result.movedCount) 个文件（\(size)）移到废纸篓。", "Moved \(result.movedCount) files (\(size)) to Trash.")
+        var details = loc.text("清空废纸篓后才会释放磁盘空间。", "Disk space is released after emptying Trash.")
+        if !result.failures.isEmpty {
+            details += "\n" + result.failures.joined(separator: "\n")
         }
-        
-        // 2. 清理用户缓存中的旧文件
-        let userCaches = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches")
-        
-        if let enumerator = FileManager.default.enumerator(at: userCaches, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) {
-            let oneWeekAgo = Date().addingTimeInterval(-7 * 24 * 3600)
-            while let fileURL = enumerator.nextObject() as? URL {
-                if let modDate = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
-                   modDate < oneWeekAgo,
-                   let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                    if (try? FileManager.default.removeItem(at: fileURL)) != nil {
-                        totalCleaned += Int64(size)
-                        filesDeleted += 1
-                    }
-                }
-            }
-        }
-        
-        // 3. 运行 purge 清理磁盘缓存
-        let purge = Process()
-        purge.executableURL = URL(fileURLWithPath: "/usr/sbin/purge")
-        try? purge.run()
-        purge.waitUntilExit()
-        
-        let cleanedGB = Double(totalCleaned) / (1024 * 1024 * 1024)
-        if cleanedGB > 0.1 {
-            return (true, loc.text("已释放 \(String(format: "%.2f", cleanedGB)) GB 空间", "Freed \(String(format: "%.2f", cleanedGB)) GB of space"), loc.text("删除了 \(filesDeleted) 个旧文件", "Deleted \(filesDeleted) old files"))
-        } else {
-            return (true, loc.text("清理完成", "Cleanup Complete"), loc.text("系统较为干净，未发现大量可清除文件", "The system is already clean; no large amount of purgeable data was found"))
-        }
+        if result.cancelled { details += loc.text(" 已停止。", " Stopped.") }
+        return (result.failures.isEmpty && !result.cancelled, message, details)
     }
-    
-    // 获取目录大小（仅统计超过指定天数的文件）
-    private func getDirectorySize(_ path: String, olderThanDays days: Int) -> (size: Int64, count: Int)? {
-        let cutoffDate = Date().addingTimeInterval(-Double(days) * 24 * 3600)
-        var totalSize: Int64 = 0
-        var fileCount = 0
-        
-        guard let enumerator = FileManager.default.enumerator(atPath: path) else { return nil }
-        
-        while let file = enumerator.nextObject() as? String {
-            let filePath = (path as NSString).appendingPathComponent(file)
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
-               let modDate = attrs[.modificationDate] as? Date,
-               modDate < cutoffDate,
-               let size = attrs[.size] as? Int64 {
-                totalSize += size
-                fileCount += 1
-            }
-        }
-        
-        return (totalSize, fileCount)
-    }
-    
+
     // MARK: - 刷新 DNS 缓存
     private func flushDNS() async -> (success: Bool, message: String, details: String?) {
         let loc = LocalizationManager.shared
-        var success = true
-        
-        // 刷新 DNS 缓存
-        let dscacheutil = Process()
-        dscacheutil.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
-        dscacheutil.arguments = ["-flushcache"]
-        try? dscacheutil.run()
-        dscacheutil.waitUntilExit()
-        
-        // 重启 mDNSResponder
-        let killall = Process()
-        killall.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        killall.arguments = ["-HUP", "mDNSResponder"]
-        try? killall.run()
-        killall.waitUntilExit()
-        
-        if killall.terminationStatus != 0 {
-            success = false
+        let flush = runCheckedMaintenanceCommand("/usr/bin/dscacheutil", ["-flushcache"])
+        guard !runWasCancelled && !Task.isCancelled else {
+            return (false, loc.text("操作已停止", "Operation Stopped"), nil)
         }
-        
-        return (success, loc.text("DNS 缓存已刷新", "DNS Cache Flushed"), loc.text("网络连接问题现在应该已经解决", "Network connection issues should now be resolved"))
+        let responder = runCheckedMaintenanceCommand("/usr/bin/killall", ["-HUP", "mDNSResponder"])
+        let success = flush.success && responder.success
+        let errors = [flush, responder].filter { !$0.success }.map { $0.output }.filter { !$0.isEmpty }
+        return (success,
+                success ? loc.text("DNS 缓存已刷新", "DNS Cache Flushed") : loc.text("DNS 刷新未完成", "DNS Refresh Incomplete"),
+                success ? loc.text("系统已接受刷新命令。", "The system accepted the refresh commands.") : errors.joined(separator: "\n"))
     }
-    
+
     // MARK: - 加速邮件 (优化 Mail 数据库)
     private func speedUpMail() async -> (success: Bool, message: String, details: String?) {
         let loc = LocalizationManager.shared
-        let mailDataPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Mail")
-        
-        var dbOptimized = false
-        var cacheCleaned: Int64 = 0
-        
-        // 查找 Envelope Index 数据库文件
-        let possiblePaths = [
-            mailDataPath.appendingPathComponent("V10/MailData/Envelope Index"),
-            mailDataPath.appendingPathComponent("V9/MailData/Envelope Index"),
-            mailDataPath.appendingPathComponent("V8/MailData/Envelope Index")
-        ]
-        
-        for dbPath in possiblePaths {
-            if FileManager.default.fileExists(atPath: dbPath.path) {
-                // 使用 sqlite3 执行 VACUUM 优化数据库
-                let sqlite = Process()
-                sqlite.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-                sqlite.arguments = [dbPath.path, "VACUUM;"]
-                try? sqlite.run()
-                sqlite.waitUntilExit()
-                
-                // 执行 REINDEX
-                let reindex = Process()
-                reindex.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-                reindex.arguments = [dbPath.path, "REINDEX;"]
-                try? reindex.run()
-                reindex.waitUntilExit()
-                
-                dbOptimized = true
-                break
-            }
+        guard !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.apple.mail" }) else {
+            return (false, loc.text("请先退出 Mail", "Quit Mail First"), loc.text("请保存工作并退出 Mail 后再维护数据库。", "Save your work and quit Mail before maintaining its database."))
         }
-        
-        // 清理邮件下载缓存
-        let mailDownloads = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Mail Downloads")
-        if FileManager.default.fileExists(atPath: mailDownloads.path) {
-            if let contents = try? FileManager.default.contentsOfDirectory(at: mailDownloads, includingPropertiesForKeys: [.fileSizeKey]) {
-                for item in contents {
-                    if let size = try? item.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                        cacheCleaned += Int64(size)
-                    }
-                    try? FileManager.default.removeItem(at: item)
-                }
-            }
+        let mailRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Mail")
+        guard let versions = try? FileManager.default.contentsOfDirectory(at: mailRoot, includingPropertiesForKeys: [.isDirectoryKey]) else {
+            return (false, loc.text("无法读取邮件数据库", "Cannot Read Mail Database"), loc.text("请检查 Mail 数据及访问权限。", "Check Mail data and access permissions."))
         }
-        
-        if dbOptimized {
-            let cleanedMB = Double(cacheCleaned) / (1024 * 1024)
-            if cleanedMB > 1 {
-                return (true, loc.text("邮件已优化", "Mail Optimized"), loc.text("数据库已重建，并清理了 \(String(format: "%.1f", cleanedMB)) MB 缓存", "The database was rebuilt and \(String(format: "%.1f", cleanedMB)) MB of cache was cleaned"))
-            } else {
-                return (true, loc.text("邮件已优化", "Mail Optimized"), loc.text("数据库索引已重建", "The database index was rebuilt"))
-            }
-        } else {
-            return (false, loc.text("未找到邮件数据库", "Mail Database Not Found"), loc.text("请确保已安装 Mail 应用", "Make sure the Mail app is installed"))
+        let databases = versions.filter { $0.lastPathComponent.range(of: "^V[0-9]+$", options: .regularExpression) != nil }
+            .sorted { $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedDescending }
+            .map { $0.appendingPathComponent("MailData/Envelope Index") }
+        guard let database = databases.first(where: { FileManager.default.fileExists(atPath: $0.path) }),
+              database.standardizedFileURL.path == database.resolvingSymlinksInPath().path else {
+            return (false, loc.text("未找到可维护的邮件数据库", "No Mail Database Available"), nil)
         }
+        let result = runCheckedMaintenanceCommand("/usr/bin/sqlite3", [database.path, ".timeout 3000", "VACUUM; REINDEX;"])
+        return (result.success,
+                result.success ? loc.text("邮件数据库维护完成", "Mail Database Maintenance Complete") : loc.text("邮件数据库维护失败", "Mail Database Maintenance Failed"),
+                result.success ? loc.text("邮件及下载附件已保留。", "Mail and downloaded attachments were kept.") : result.output)
     }
-    
+
     // MARK: - 重建 Spotlight 索引
     private func rebuildSpotlight() async -> (success: Bool, message: String, details: String?) {
         let loc = LocalizationManager.shared
@@ -789,200 +681,58 @@ class MaintenanceService: ObservableObject {
     // MARK: - 修复磁盘权限
     private func repairPermissions() async -> (success: Bool, message: String, details: String?) {
         let loc = LocalizationManager.shared
-        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
-        var fixedCount = 0
-        
-        // 修复主目录权限
-        let chmodHome = Process()
-        chmodHome.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        chmodHome.arguments = ["755", homePath]
-        try? chmodHome.run()
-        chmodHome.waitUntilExit()
-        if chmodHome.terminationStatus == 0 { fixedCount += 1 }
-        
-        // REMOVED: Recursive permission repair on Library is dangerous and can break system settings
-        // let chmodLib = Process() ...
-        
-        // 修复常用目录权限
-        let userDirs = ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music"]
-        for dir in userDirs {
-            let dirPath = "\(homePath)/\(dir)"
-            if FileManager.default.fileExists(atPath: dirPath) {
-                let chmod = Process()
-                chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
-                chmod.arguments = ["700", dirPath]
-                try? chmod.run()
-                chmod.waitUntilExit()
-                if chmod.terminationStatus == 0 { fixedCount += 1 }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var inaccessible: [String] = []
+        for name in ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music"] {
+            let path = home.appendingPathComponent(name).path
+            if FileManager.default.fileExists(atPath: path),
+               !FileManager.default.isReadableFile(atPath: path) || !FileManager.default.isWritableFile(atPath: path) {
+                inaccessible.append(name)
             }
         }
-        
-        // 修复 .ssh 目录权限 (如果存在)
-        let sshPath = "\(homePath)/.ssh"
-        var sshFixed = false
-        if FileManager.default.fileExists(atPath: sshPath) {
-            let chmodSsh = Process()
-            chmodSsh.executableURL = URL(fileURLWithPath: "/bin/chmod")
-            chmodSsh.arguments = ["700", sshPath]
-            try? chmodSsh.run()
-            chmodSsh.waitUntilExit()
-            
-            // 修复 SSH 密钥权限
-            let chmodKeys = Process()
-            chmodKeys.executableURL = URL(fileURLWithPath: "/bin/chmod")
-            chmodKeys.arguments = ["600", "\(sshPath)/id_rsa", "\(sshPath)/id_ed25519"]
-            try? chmodKeys.run()
-            chmodKeys.waitUntilExit()
-            
-            sshFixed = true
-        }
-        
-        let details = sshFixed
-            ? loc.text("修复了 \(fixedCount) 个目录的权限（包括 SSH）", "Repaired permissions for \(fixedCount) directories, including SSH")
-            : loc.text("修复了 \(fixedCount) 个目录的权限", "Repaired permissions for \(fixedCount) directories")
-        return (true, loc.text("权限修复完成", "Permission Repair Complete"), details)
+        return (inaccessible.isEmpty,
+                inaccessible.isEmpty ? loc.text("目录访问检查完成", "Directory Access Check Complete") : loc.text("部分目录无法访问", "Some Directories Are Inaccessible"),
+                inaccessible.isEmpty
+                    ? loc.text("用户目录可读写，现有权限设置已保留。", "User directories are readable and writable; existing permissions were preserved.")
+                    : loc.text("请在系统设置中检查文件访问权限：", "Review file access in System Settings: ") + inaccessible.joined(separator: ", "))
     }
-    
+
     // MARK: - 清理时间机器快照
     private func cleanTimeMachine() async -> (success: Bool, message: String, details: String?) {
         let loc = LocalizationManager.shared
-        // 列出所有本地快照
-        let listTask = Process()
-        listTask.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
-        listTask.arguments = ["listlocalsnapshots", "/"]
-        
-        let pipe = Pipe()
-        listTask.standardOutput = pipe
-        
-        try? listTask.run()
-        listTask.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8), !output.isEmpty else {
-            return (true, loc.text("没有可删除的快照", "No Snapshots to Delete"), loc.text("未找到本地 Time Machine 快照", "No local Time Machine snapshots were found"))
+        let listing = runCheckedMaintenanceCommand("/usr/bin/tmutil", ["listlocalsnapshots", "/"])
+        guard listing.success else {
+            return (false, loc.text("无法读取本地快照", "Cannot Read Local Snapshots"), listing.output)
         }
-        
-        // 解析快照日期
-        let lines = output.components(separatedBy: "\n")
-        var snapshotDates: [String] = []
-        
-        for line in lines {
-            // 格式: com.apple.TimeMachine.2024-12-14-123456
-            if line.contains("com.apple.TimeMachine") {
-                // 提取日期部分
-                if let range = line.range(of: "\\d{4}-\\d{2}-\\d{2}-\\d{6}", options: .regularExpression) {
-                    snapshotDates.append(String(line[range]))
-                }
+        let dates = Set(listing.output.components(separatedBy: .newlines).compactMap { line -> String? in
+            guard line.contains("com.apple.TimeMachine"),
+                  let range = line.range(of: "\\d{4}-\\d{2}-\\d{2}-\\d{6}", options: .regularExpression) else { return nil }
+            return String(line[range])
+        }).sorted()
+        guard dates.count > 1 else {
+            return (true, loc.text("无需清理快照", "No Snapshot Cleanup Needed"), loc.text("保留现有快照。", "Existing snapshots were kept."))
+        }
+        var deleted = 0
+        var failures: [String] = []
+        for date in dates.dropLast() {
+            guard !runWasCancelled && !Task.isCancelled else {
+                return (false, loc.text("快照清理已停止", "Snapshot Cleanup Stopped"), loc.text("已删除 \(deleted) 个快照，其余保留。", "Deleted \(deleted) snapshots; remaining snapshots were kept."))
             }
+            let result = runCheckedMaintenanceCommand("/usr/bin/tmutil", ["deletelocalsnapshots", date])
+            if result.success { deleted += 1 } else { failures.append(date + ": " + result.output) }
+            await Task.yield()
         }
-        
-        if snapshotDates.count <= 1 {
-            return (true, loc.text("无需清理", "No Cleanup Needed"), loc.text("只有一个快照，已将其保留", "Only one snapshot exists, so it was kept"))
-        }
-        
-        var deletedCount = 0
-        
-        // 删除所有本地快照 (保留最新的一个)
-        for date in snapshotDates.dropLast() {
-            let deleteTask = Process()
-            deleteTask.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
-            deleteTask.arguments = ["deletelocalsnapshots", date]
-            try? deleteTask.run()
-            deleteTask.waitUntilExit()
-            
-            if deleteTask.terminationStatus == 0 {
-                deletedCount += 1
-            }
-        }
-        
-        if deletedCount > 0 {
-            return (true, loc.text("已删除 \(deletedCount) 个快照", "Deleted \(deletedCount) snapshots"), loc.text("已保留最新的快照", "The latest snapshot was kept"))
-        } else {
-            return (false, loc.text("删除失败", "Deletion Failed"), loc.text("可能需要管理员权限", "Administrator privileges may be required"))
-        }
+        return (failures.isEmpty,
+                loc.text("已删除 \(deleted) 个旧快照", "Deleted \(deleted) old snapshots"),
+                failures.isEmpty ? loc.text("已保留最新快照。", "The latest snapshot was kept.") : failures.joined(separator: "\n"))
     }
-    
+
     // MARK: - 修复应用程序
     private func repairApps() async -> (success: Bool, message: String, details: String?) {
-        let loc = LocalizationManager.shared
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let fileManager = FileManager.default
-        var itemsFixed = 0
-        var spaceFreed: Int64 = 0
-        
-        // 1. 清理应用崩溃日志
-        let crashReportsPath = home.appendingPathComponent("Library/Logs/DiagnosticReports")
-        if let contents = try? fileManager.contentsOfDirectory(at: crashReportsPath, includingPropertiesForKeys: [.fileSizeKey]) {
-            for item in contents where item.pathExtension == "crash" || item.pathExtension == "ips" {
-                if let size = try? item.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                    spaceFreed += Int64(size)
-                }
-                if (try? fileManager.removeItem(at: item)) != nil {
-                    itemsFixed += 1
-                }
-            }
-        }
-        
-        // 2. 清理损坏的 Saved Application State
-        let savedStatePath = home.appendingPathComponent("Library/Saved Application State")
-        if let contents = try? fileManager.contentsOfDirectory(at: savedStatePath, includingPropertiesForKeys: [.fileSizeKey]) {
-            for item in contents {
-                if let size = try? item.resourceValues(forKeys: [.totalFileSizeKey]).totalFileSize {
-                    spaceFreed += Int64(size)
-                }
-                if (try? fileManager.removeItem(at: item)) != nil {
-                    itemsFixed += 1
-                }
-            }
-        }
-        
-        // 3. 清理应用 Containers 中的临时文件
-        let containersPath = home.appendingPathComponent("Library/Containers")
-        if let apps = try? fileManager.contentsOfDirectory(at: containersPath, includingPropertiesForKeys: nil) {
-            for app in apps {
-                let tempPath = app.appendingPathComponent("Data/tmp")
-                if let tempContents = try? fileManager.contentsOfDirectory(at: tempPath, includingPropertiesForKeys: [.fileSizeKey]) {
-                    for item in tempContents {
-                        if let size = try? item.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                            spaceFreed += Int64(size)
-                        }
-                        if (try? fileManager.removeItem(at: item)) != nil {
-                            itemsFixed += 1
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 4. 重置 App Translocation 缓存
-        let translocatorReset = Process()
-        translocatorReset.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        translocatorReset.arguments = ["/System/Library/Frameworks/Security.framework/Versions/A/XPCServices/SecTranslocate.xpc/Contents/MacOS/SecTranslocate", "--reset"]
-        try? translocatorReset.run()
-        
-        // 5. 清理 Launch Services 注册的损坏应用
-        let lsregister = Process()
-        lsregister.executableURL = URL(fileURLWithPath: "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister")
-        lsregister.arguments = ["-kill", "-r", "-domain", "local", "-domain", "user"]
-        try? lsregister.run()
-        lsregister.waitUntilExit()
-        
-        // 6. 清理 Core Services 缓存
-        let cachesPaths = [
-            home.appendingPathComponent("Library/Caches/com.apple.helpd"),
-            home.appendingPathComponent("Library/Caches/com.apple.nsservicescache.plist"),
-        ]
-        for path in cachesPaths {
-            if let size = try? path.resourceValues(forKeys: [.totalFileSizeKey]).totalFileSize {
-                spaceFreed += Int64(size)
-            }
-            try? fileManager.removeItem(at: path)
-        }
-        
-        let freedMB = Double(spaceFreed) / (1024 * 1024)
-        let details = loc.text("已修复 \(itemsFixed) 个问题项，并释放 \(String(format: "%.1f", freedMB)) MB 空间", "Fixed \(itemsFixed) issues and freed \(String(format: "%.1f", freedMB)) MB of space")
-        return (true, loc.text("应用修复完成", "Application Repair Complete"), details)
+        let reports = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/DiagnosticReports")
+        return await cleanMaintenanceFiles(root: reports, kind: .diagnosticReports)
     }
+
 }
 
 // MARK: - Maintenance View

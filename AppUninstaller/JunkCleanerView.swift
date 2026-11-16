@@ -910,12 +910,10 @@ struct JunkCleanerView: View {
     func startCleaning() {
         // scanState 会通过 cleaner.isCleaning 自动变为 .cleaning
         Task {
-            cleaner.isCleaning = true
             // 使用逐分类清理方法，按设计图要求逐个分类清理
             let result = await cleaner.cleanSelectedByCategory()
             cleanResult = (result.cleaned, result.failed, result.requiresAdmin)
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-            cleaner.isCleaning = false
             showCleaningFinished = true
         }
     }

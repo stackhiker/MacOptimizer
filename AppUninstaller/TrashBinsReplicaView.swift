@@ -40,7 +40,7 @@ struct TrashBinsReplicaView: View {
         if scanner.isScanning { return .scanning }
         if scanner.isCleaning { return .cleaning }
         if cleaningFinished { return .finished }
-        if scanner.hasCompletedScan || scanner.isStopped || !scanner.items.isEmpty { return .results }
+        if scanner.hasCompletedScan || scanner.isStopped || scanner.scanFailure != nil || scanner.needsPermission || !scanner.items.isEmpty { return .results }
         return .initial
     }
 
@@ -104,7 +104,7 @@ struct TrashBinsReplicaView: View {
         .alert(localized("部分项目未能清倒", "部分項目未能清空", "Some items could not be emptied", "一部の項目を削除できませんでした", "일부 항목을 비우지 못했습니다", "Некоторые элементы не удалось удалить"), isPresented: $showCleaningFailure) {
             Button(localized("完成", "Done"), role: .cancel) {}
         } message: {
-            Text(localized("这些项目可能正在使用中，或当前账户没有访问权限。", "這些項目可能正在使用中，或目前帳號沒有存取權限。", "These items may be in use or inaccessible to the current account.", "これらの項目は使用中か、現在のアカウントではアクセスできない可能性があります。", "이 항목은 사용 중이거나 현재 계정에서 접근할 수 없을 수 있습니다.", "Возможно, эти элементы используются или недоступны текущей учётной записи."))
+            Text(scanner.deletionFailures.map { "\($0.path.path)\n\($0.message)" }.joined(separator: "\n\n"))
         }
     }
 
@@ -183,12 +183,12 @@ struct TrashBinsReplicaView: View {
                         .foregroundColor(.white.opacity(0.96))
 
                     Text(localized(
-                        "清倒 Mac 上所有废纸篓，包括邮件和照片中的废纸篓。",
-                        "清空 Mac 上所有垃圾桶，包括郵件和照片中的垃圾桶。",
-                        "Empty all Trash on your Mac, including Mail and Photos trash.",
-                        "メールや写真を含む、Mac上のすべてのゴミ箱を空にします。",
-                        "Mail과 사진을 포함하여 Mac의 모든 휴지통을 비웁니다.",
-                        "Очистите все Корзины на Mac, включая корзины Почты и Фото."
+                        "检查当前用户的系统废纸篓，并永久删除明确选择的项目。",
+                        "檢查目前使用者的系統廢紙簍，並永久刪除明確選擇的項目。",
+                        "Review the current user's system Trash and permanently delete selected items.",
+                        "現在のユーザーのゴミ箱を確認し、選択した項目を完全に削除します。",
+                        "현재 사용자의 휴지통을 검토하고 선택한 항목을 영구 삭제합니다.",
+                        "Просмотрите Корзину текущего пользователя и удалите выбранные элементы навсегда."
                     ))
                     .font(.system(size: 13))
                     .foregroundColor(.white.opacity(0.62))
@@ -289,6 +289,13 @@ struct TrashBinsReplicaView: View {
     private var resultsPage: some View {
         if scanner.needsPermission && scanner.items.isEmpty {
             permissionPage
+        } else if let failure = scanner.scanFailure {
+            VStack(spacing: 12) {
+                Text(localized("扫描未完成", "Scan incomplete"))
+                Text(failure.message).textSelection(.enabled)
+            }
+        } else if scanner.isStopped && scanner.items.isEmpty {
+            Text(localized("扫描已停止，尚未获得完整结果。", "Scan stopped before results were complete."))
         } else if scanner.items.isEmpty {
             emptyResultPage
         } else {
@@ -309,7 +316,7 @@ struct TrashBinsReplicaView: View {
                     Text(localized("非常干净！", "Very clean!"))
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.white.opacity(0.96))
-                    Text(localized("所有废纸篓都是空的。", "所有垃圾桶都是空的。", "There are no files in any Trash folder.", "すべてのゴミ箱は空です。", "모든 휴지통이 비어 있습니다.", "Все Корзины пусты."))
+                    Text(localized("当前用户的系统废纸篓为空。", "The current user’s system Trash is empty."))
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.52))
                 }
@@ -620,9 +627,10 @@ struct TrashBinsReplicaView: View {
                     Text(localized("清倒完成！", "垃圾桶已清空！", "Trash emptied!", "ゴミ箱を空にしました！", "휴지통을 비웠습니다!", "Корзина очищена!"))
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.white.opacity(0.96))
-                    Text(localized("已释放 ", "已釋放 ", "Freed ", "解放した容量：", "확보한 공간: ", "Освобождено: ") + formatBytes(cleanedAmount))
+                    Text(localized("已永久删除的文件大小 ", "已永久刪除的檔案大小 ", "Permanently deleted file size: ", "完全に削除したファイル：", "영구 삭제한 파일 크기: ", "Размер удалённых файлов: ") + formatBytes(cleanedAmount))
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.52))
+                    CleanupDiskObservationView(change: scanner.diskSpaceChange)
                 }
             }
             .frame(width: 355, alignment: .leading)
@@ -639,7 +647,7 @@ struct TrashBinsReplicaView: View {
         CleanMyMacBottomActionSlot {
             if showingDetails {
                 CleanMyMacBottomActionCluster {
-                    orbButton(localized("清倒", "Empty"), style: .empty, disabled: selectedSize == 0) {
+                    orbButton(localized("清倒", "Empty"), style: .empty, disabled: selectedItems.isEmpty) {
                         showEmptyConfirmation = true
                     }
                 } accessory: {
@@ -658,7 +666,7 @@ struct TrashBinsReplicaView: View {
                         scanner.stopScan()
                     }
                 case .results:
-                    orbButton(localized("清倒", "Empty"), style: .empty, disabled: selectedSize == 0) {
+                    orbButton(localized("清倒", "Empty"), style: .empty, disabled: selectedItems.isEmpty) {
                         showEmptyConfirmation = true
                     }
                 case .cleaning:
@@ -831,8 +839,7 @@ struct TrashBinsReplicaView: View {
     }
 
     private func performCleaning() {
-        let amountBeforeCleaning = selectedSize
-        guard amountBeforeCleaning > 0 else { return }
+        guard !selectedItems.isEmpty else { return }
         showingDetails = false
 
         Task {

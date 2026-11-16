@@ -589,7 +589,7 @@ struct MailAttachmentsReplicaView: View {
                     Text(localized("清理完成！", "清理完成！", "Cleanup complete!", "クリーニング完了！", "정리 완료!", "Очистка завершена!"))
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.white.opacity(0.96))
-                    Text(localized("已释放 ", "已釋放 ", "Freed ", "解放した容量：", "확보한 공간: ", "Освобождено: ") + formatBytes(cleanedAmount))
+                    Text(localized("已移至废纸篓 ", "已移至廢紙簍 ", "Moved to Trash: ", "ゴミ箱に移動：", "휴지통으로 이동: ", "Перемещено в Корзину: ") + formatBytes(cleanedAmount))
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.52))
                 }

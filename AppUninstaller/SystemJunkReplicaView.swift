@@ -78,12 +78,12 @@ struct SystemJunkReplicaView: View {
                        "Deleted user accounts may leave data behind that you can review and remove.",
                        "person.crop.circle.badge.xmark", [.gray, Color(red: 0.44, green: 0.36, blue: 0.61)]),
             descriptor("iosBackups", .iosBackups, "iOS 设备备份", "iOS Device Backups",
-                       "所有 iOS 设备备份都储存在 Mac 上。您可以轻松移除旧备份，而且不丢失任何数据。",
-                       "All iOS device backups are stored on your Mac. Old backups can be reviewed and removed.",
+                       "设备备份包含个人数据，不参与垃圾清理。请在 Finder 的设备管理中检查和管理备份。",
+                       "Device backups contain personal data and are excluded from junk cleanup. Manage them in Finder.",
                        "iphone", [Color(red: 0.40, green: 0.61, blue: 0.86), Color(red: 0.32, green: 0.40, blue: 0.68)]),
-            descriptor("oldUpdates", .oldUpdates, "旧更新", "Old Updates",
-                       "部分应用程序因为有旧更新文件所以浪费了大量空间。您可以安全将其移除。",
-                       "Old application update files can waste space and may be safely removed.",
+            descriptor("oldUpdates", .oldUpdates, "安装残留与旧备份", "Installation Residues & Old Backups",
+                       "已识别的安装暂存和旧应用备份，默认不选。请确认不再需要后手动勾选；清理前会重新检查，符合条件的项目将移至废纸篓。",
+                       "Recognized installation staging and old app backups are unselected by default. Select only items you no longer need. They are checked again before being moved to Trash.",
                        "arrow.down.doc.fill", [Color(red: 0.84, green: 0.54, blue: 0.53), Color(red: 0.50, green: 0.40, blue: 0.66)]),
             descriptor("brokenLoginItems", .brokenLoginItems, "损坏的登录项", "Broken Login Items",
                        "在某些情况下，应用程序或服务被移除后，它的破损链接仍留在登录项中。",
@@ -154,7 +154,7 @@ struct SystemJunkReplicaView: View {
         .alert(localized("部分文件未能移至废纸篓", "Some Files Could Not Be Moved to Trash"), isPresented: $showAdminWarning) {
             Button(localized("完成", "Done"), role: .cancel) { cleaningFinished = true }
         } message: {
-            Text(localized("部分文件因权限不足无法删除。", "Some files could not be deleted because of insufficient privileges."))
+            Text(cleaner.deletionFailures.map { "\($0.path.path)\n\($0.message)" }.joined(separator: "\n\n"))
         }
     }
 
@@ -578,10 +578,12 @@ struct SystemJunkReplicaView: View {
                     .foregroundColor(Color(red: 0.35, green: 0.84, blue: 0.96))
                     .padding(.top, 20)
 
-                Text(localized("不需要的系统垃圾已移除。", "Unneeded system junk has been removed."))
+                Text(localized("以上大小的文件已移至废纸篓；清空后才能回收这些文件的空间。", "Files of this size were moved to Trash. Empty Trash to reclaim their space."))
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.55))
                     .padding(.top, 12)
+                CleanupDiskObservationView(change: cleaner.diskSpaceChange)
+                    .padding(.top, 8)
 
                 Button {
                     showingDetails = true
@@ -814,13 +816,10 @@ struct SystemJunkReplicaView: View {
     private func startCleaning() {
         guard moduleSelectedSize > 0 else { return }
         cleaner.junkItems.filter { $0.type == .mailAttachments }.forEach { $0.isSelected = false }
-        let selectedBefore = moduleSelectedSize
         Task {
-            cleaner.isCleaning = true
             let result = await cleaner.cleanSelectedByCategory()
-            cleaner.isCleaning = false
             if cleaner.stopCleaningRequested { return }
-            cleanedAmount = result.cleaned > 0 ? result.cleaned : selectedBefore - moduleSelectedSize
+            cleanedAmount = result.cleaned
             showAdminWarning = result.requiresAdmin
             if !result.requiresAdmin { cleaningFinished = true }
         }
@@ -832,11 +831,7 @@ struct SystemJunkReplicaView: View {
     }
 
     private func applySmartSelection() {
-        let recommended: Set<JunkType> = [
-            .userCache, .systemCache, .userLogs, .systemLogs,
-            .browserCache, .appCache, .chatCache, .tempFiles, .crashReports
-        ]
-        cleaner.junkItems.forEach { $0.isSelected = recommended.contains($0.type) }
+        cleaner.junkItems.forEach { $0.isSelected = JunkCleaner.shouldSelectByDefault($0) }
         cleaner.objectWillChange.send()
     }
 

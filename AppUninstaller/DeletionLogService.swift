@@ -93,16 +93,8 @@ class DeletionLogService: ObservableObject {
     func trashItem(at url: URL, category: String = "SmartClean") throws {
         let originalPath = url.path
         
-        // 获取文件大小
-        let size: Int64
-        if let attrs = try? fileManager.attributesOfItem(atPath: originalPath),
-           let fileSize = attrs[.size] as? Int64 {
-            size = fileSize
-        } else {
-            // 如果是目录，计算总大小
-            size = calculateSize(at: url)
-        }
-        
+        let size = CleanupFileSystem.logicalSize(at: url)
+
         // 使用 trashItem 并获取废纸篓中的新路径
         let trashURL = try moveToTrash(url)
 

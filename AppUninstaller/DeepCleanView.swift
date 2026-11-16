@@ -19,7 +19,8 @@ struct DeepCleanView: View {
     
     // Alert States
     @State private var showCleanConfirmation = false
-    @State private var cleanResult: (count: Int, size: Int64)?
+    @State private var cleanResult: DeepCleanResult?
+    @State private var showingFailures = false
     
     var body: some View {
         ZStack {
@@ -55,7 +56,7 @@ struct DeepCleanView: View {
         }
         .onChange(of: scanner.isScanning) { isScanning in
              if isScanning { viewState = .scanning }
-             else if scanner.totalSize > 0 { viewState = .results }
+             else { viewState = scanner.items.isEmpty ? .initial : .results }
         }
         .onChange(of: scanner.isCleaning) { newValue in
              if newValue {
@@ -68,7 +69,10 @@ struct DeepCleanView: View {
         .sheet(isPresented: $showingDetails) {
             DeepCleanDetailView(scanner: scanner, category: selectedCategoryForDetails, isPresented: $showingDetails)
         }
-        .confirmationDialog(loc.L("confirm_clean"), isPresented: $showCleanConfirmation) {
+        .sheet(isPresented: $showingFailures) {
+            failureDetails
+        }
+        .confirmationDialog(loc.text("将选中项目移入废纸篓？", "Move selected items to Trash?"), isPresented: $showCleanConfirmation) {
             Button(loc.text(
     simplifiedChinese: "开始清理",
     traditionalChinese: "開始清理",
@@ -85,7 +89,7 @@ struct DeepCleanView: View {
             Button(loc.L("cancel"), role: .cancel) {}
         } message: {
             Text(loc.text(
-    simplifiedChinese: "确定要清理选中的 \(scanner.selectedCount) 个项目吗？总大小 \(ByteCountFormatter.string(fromByteCount: scanner.selectedSize, countStyle: .file))",
+    simplifiedChinese: "将选中的 \(scanner.selectedCount) 个项目移入废纸篓，逻辑大小 \(ByteCountFormatter.string(fromByteCount: scanner.selectedSize, countStyle: .file))。文件仍可恢复，清空废纸篓后才可能释放磁盘空间。",
     traditionalChinese: "確定要清理選取的\(scanner.selectedCount)個項目嗎？總大小\(ByteCountFormatter.string(fromByteCount: scanner.selectedSize, countStyle: .file))",
     english: "Are you sure you want to clean \(scanner.selectedCount) selected items? Total size: \(ByteCountFormatter.string(fromByteCount: scanner.selectedSize, countStyle: .file))",
     japanese: "選択した\(scanner.selectedCount)項目をクリーニングしますか？合計サイズ：\(ByteCountFormatter.string(fromByteCount: scanner.selectedSize, countStyle: .file))",
@@ -120,21 +124,16 @@ struct DeepCleanView: View {
         case .scanning:
             CleanMyMacBottomActionCluster {
                 deepCleanOrb(
-                    title: loc.text(
-    simplifiedChinese: "停止",
-    traditionalChinese: "停止",
-    english: "Stop",
-    japanese: "停止",
-    korean: "정지",
-    russian: "Остановить"
-),
+                    title: scanner.isStoppingScan
+                        ? loc.text("正在停止…", "Stopping…")
+                        : loc.text("停止", "Stop"),
                     colors: [Color(hex: "5E5CE6"), Color(hex: "3A3A8A")],
                     glow: Color(hex: "7D7AFF"),
                     ring: Color.white.opacity(0.62),
+                    disabled: scanner.isStoppingScan,
                     progress: scanner.scanProgress
                 ) {
                     scanner.stopScan()
-                    viewState = .initial
                 }
             } accessory: {
                 Text(ByteCountFormatter.string(fromByteCount: scanner.totalSize, countStyle: .file))
@@ -184,8 +183,12 @@ struct DeepCleanView: View {
                 ring: Color.white.opacity(0.46)
             ) {
                 withAnimation {
-                    viewState = .initial
-                    scanner.reset()
+                    if scanner.items.isEmpty {
+                        scanner.reset()
+                        viewState = .initial
+                    } else {
+                        viewState = .results
+                    }
                     cleanResult = nil
                 }
             }
@@ -193,6 +196,47 @@ struct DeepCleanView: View {
         default:
             EmptyView()
         }
+    }
+
+    private var cleanupSummaryTitle: String {
+        if scanner.lastCleanupResult?.wasStopped == true {
+            return loc.text("清理已停止", "Cleanup stopped")
+        }
+        if !scanner.lastFailures.isEmpty {
+            return loc.text("部分项目未能清理", "Some items could not be cleaned")
+        }
+        return loc.text("已移入废纸篓", "Moved to Trash")
+    }
+
+    private func signedSize(_ value: Int64) -> String {
+        let prefix = value >= 0 ? "+" : "−"
+        return prefix + ByteCountFormatter.string(fromByteCount: abs(value), countStyle: .file)
+    }
+
+    private var failureDetails: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(loc.text("未能移入废纸篓的项目", "Items not moved to Trash"))
+                .font(.title2.bold())
+            Text(loc.text("这些项目已保留。请根据具体原因处理后重试。", "These items were kept. Resolve the reported issue before retrying."))
+                .foregroundColor(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(Array(scanner.lastFailures.enumerated()), id: \.offset) { _, failure in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(failure.path.path).font(.system(.body, design: .monospaced))
+                            Text(failure.message).foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        Divider()
+                    }
+                }
+            }
+            Button(loc.L("done")) { showingFailures = false }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(24)
+        .frame(width: 640, height: 420)
     }
 
     private func deepCleanOrb(
@@ -417,6 +461,7 @@ struct DeepCleanView: View {
                 HStack(spacing: 20) {
                     scanningCategoryCard(for: .systemCaches)
                     scanningCategoryCard(for: .appResiduals)
+                    scanningCategoryCard(for: .installationResidues)
                 }
             }
             .padding(.horizontal, 40)
@@ -530,7 +575,7 @@ struct DeepCleanView: View {
                     // 主要文字（文件大小或状态）
                     if isCompleted {
                         // 只统计选中的项目
-                        let categoryItems = scanner.items.filter { $0.category == category && $0.isSelected }
+                        let categoryItems = scanner.items.filter { $0.category == category && ($0.isSelected || category == .installationResidues) }
                         let size = categoryItems.reduce(0) { $0 + $1.size }
                         Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
                             .font(.system(size: 28, weight: .bold))
@@ -613,6 +658,7 @@ struct DeepCleanView: View {
                 HStack(spacing: 20) {
                     resultCategoryCard(for: .systemCaches)
                     resultCategoryCard(for: .appResiduals)
+                    resultCategoryCard(for: .installationResidues)
                 }
             }
             .padding(.horizontal, 40)
@@ -625,8 +671,8 @@ struct DeepCleanView: View {
     
     // MARK: - Result Card (与扫描中页面完全一致)
     func resultCategoryCard(for category: DeepCleanCategory) -> some View {
-        // 只统计选中的项目，这样用户取消勾选时卡片数字会变化
-        let items = scanner.items.filter { $0.category == category && $0.isSelected }
+        // Review-only installation candidates remain visible while unselected.
+        let items = scanner.items.filter { $0.category == category && ($0.isSelected || category == .installationResidues) }
         let totalSize = items.reduce(0) { $0 + $1.size }
         let isCompleted = !scanner.items.filter { $0.category == category }.isEmpty // 只要分类下有项目（不管有没有选中）就显示完成态
         
@@ -707,6 +753,11 @@ struct DeepCleanView: View {
                     Spacer()
                     HStack {
                         VStack(alignment: .leading, spacing: 8) {
+                            if category == .installationResidues && !items.isEmpty {
+                                Text(loc.text(simplifiedChinese: "需要确认", traditionalChinese: "需要確認", english: "Review Required", japanese: "確認が必要", korean: "확인 필요", russian: "Требуется проверка"))
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.yellow)
+                            }
                             Text(ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file))
                                 .font(.system(size: 28, weight: .bold))
                                 .foregroundColor(.white)
@@ -826,7 +877,7 @@ struct DeepCleanView: View {
                     
                     VStack(spacing: 16) {
                         // Only show categories with selected items (只显示有选中项目的分类)
-                        let allCategories: [DeepCleanCategory] = [.junkFiles, .systemLogs, .systemCaches, .appResiduals, .largeFiles]
+                        let allCategories: [DeepCleanCategory] = [.junkFiles, .systemLogs, .systemCaches, .appResiduals, .largeFiles, .installationResidues]
                         let categoriesToShow = allCategories.filter { cat in
                             scanner.items.contains { $0.category == cat && $0.isSelected }
                         }
@@ -906,24 +957,10 @@ struct DeepCleanView: View {
                 // Right: Results
                 VStack(alignment: .leading, spacing: 30) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(loc.text(
-    simplifiedChinese: "做得不错！",
-    traditionalChinese: "做得很好！",
-    english: "Well done!",
-    japanese: "お疲れさまです！",
-    korean: "잘하셨어요!",
-    russian: "Отличный результат!"
-))
+                        Text(cleanupSummaryTitle)
                             .font(.system(size: 36, weight: .bold))
                             .foregroundColor(.white)
-                        Text(loc.text(
-    simplifiedChinese: "您的 Mac 状态很好。",
-    traditionalChinese: "您的Mac 狀態很好。",
-    english: "Your Mac is in good shape.",
-    japanese: "お使いのMacは良好な状態です。",
-    korean: "Mac의 상태가 양호합니다.",
-    russian: "Ваш Mac в хорошей форме."
-))
+                        Text(loc.text("成功项目已移入废纸篓，清空后才可能释放磁盘空间。", "Successful items were moved to Trash. Empty Trash to reclaim space."))
                             .font(.system(size: 16))
                             .foregroundColor(.white.opacity(0.6))
                     }
@@ -941,9 +978,9 @@ struct DeepCleanView: View {
     russian: "Глубокая очистка"
 ),
                             subtitle: loc.text(
-    simplifiedChinese: "不需要的文件已移除",
-    traditionalChinese: "不需要的文件已移除",
-    english: "Files removed",
+    simplifiedChinese: "已移入废纸篓（逻辑大小）",
+    traditionalChinese: "已移至垃圾桶（邏輯大小）",
+    english: "Moved to Trash (logical size)",
     japanese: "削除されたファイル",
     korean: "파일 제거됨",
     russian: "Файлов удалено"
@@ -951,6 +988,21 @@ struct DeepCleanView: View {
                             stat: ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)
                         )
                         
+                        if let change = scanner.lastCleanupResult?.diskSpaceChange {
+                            Text(loc.text("磁盘可用空间观测变化：", "Observed available-space change: ") + signedSize(change))
+                                .font(.system(size: 12))
+                                .foregroundColor(.white.opacity(0.6))
+                            Text(loc.text("此变化也受其他进程、系统缓存和快照影响。", "Other processes, system caches and snapshots also affect this change."))
+                                .font(.system(size: 11))
+                                .foregroundColor(.white.opacity(0.5))
+                        }
+                        if !scanner.lastFailures.isEmpty {
+                            Button(loc.text("查看 \(scanner.lastFailures.count) 个失败项目", "View \(scanner.lastFailures.count) failed items")) {
+                                showingFailures = true
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
                         // 2. Items Cleaned
                         if let result = cleanResult {
                             DeepCleanResultRow(
@@ -1002,6 +1054,7 @@ struct DeepCleanView: View {
         case .junkFiles: return Color(hex: "FF5757") // 红色
         case .systemLogs: return Color(hex: "5B9BD5") // 蓝色
         case .systemCaches: return Color(hex: "70C1B3") // 青色
+        case .installationResidues: return Color(hex: "8885FF")
         case .appResiduals: return Color(hex: "FFD93D") // 黄色
         }
     }
@@ -1012,6 +1065,7 @@ struct DeepCleanView: View {
         case .junkFiles: return Color(hex: "B80F0A") // 深红
         case .systemLogs: return Color(hex: "2E5C8A") // 深蓝
         case .systemCaches: return Color(hex: "29A39B") // 深青
+        case .installationResidues: return Color(hex: "514AA8")
         case .appResiduals: return Color(hex: "F77F00") // 橙色
         }
     }
@@ -1023,6 +1077,7 @@ struct DeepCleanView: View {
         case .systemLogs: return "doc.text.fill"
         case .systemCaches: return "server.rack"
         case .appResiduals: return "app.badge"
+        case .installationResidues: return "shippingbox.fill"
         }
     }
     
@@ -1033,6 +1088,7 @@ struct DeepCleanView: View {
         case .systemLogs: return "deepclean_log_files"
         case .systemCaches: return "deepclean_cache_files"
         case .appResiduals: return "deepclean_app_residue"
+        case .installationResidues: return nil
         }
     }
 }
@@ -1263,6 +1319,13 @@ struct DeepCleanDetailView: View {
                 Text(category.localizedName)
                     .font(.system(size: 16, weight: .bold))
                     .foregroundColor(.white)
+
+                if category == .installationResidues {
+                    Text(loc.text(simplifiedChinese: "默认不选择。请确认这些安装文件和旧备份不再需要后再勾选。", traditionalChinese: "預設不選取。請確認這些安裝檔和舊備份不再需要後再勾選。", english: "Unselected by default. Select only installation files and old backups you no longer need.", japanese: "初期状態では未選択です。不要と確認したインストールファイルと旧バックアップだけ選択してください。", korean: "기본으로 선택되지 않습니다. 필요 없는 설치 파일과 이전 백업만 선택하세요.", russian: "По умолчанию не выбраны. Выберите только ненужные файлы установки и старые копии."))
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 
                 // 修改：只计算选中项的大小和数量
                 let selectedItems = items.filter { $0.isSelected }
@@ -1333,6 +1396,7 @@ struct DeepCleanDetailView: View {
         case .junkFiles: return Color(hex: "FF5757")
         case .systemLogs: return Color(hex: "5B9BD5")
         case .systemCaches: return Color(hex: "70C1B3")
+        case .installationResidues: return Color(hex: "8885FF")
         case .appResiduals: return Color(hex: "FFD93D")
         }
     }
@@ -1343,6 +1407,7 @@ struct DeepCleanDetailView: View {
         case .junkFiles: return Color(hex: "B80F0A")
         case .systemLogs: return Color(hex: "2E5C8A")
         case .systemCaches: return Color(hex: "29A39B")
+        case .installationResidues: return Color(hex: "514AA8")
         case .appResiduals: return Color(hex: "F77F00")
         }
     }
@@ -1395,6 +1460,14 @@ struct DeepCleanItemRow: View {
                     .font(.system(size: 9))
                     .foregroundColor(.secondaryText)
                     .lineLimit(1)
+
+                if let reason = item.installationReviewReason {
+                    Text(reason)
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                        .lineLimit(2)
+                        .help(reason)
+                }
             }
             
             Spacer()

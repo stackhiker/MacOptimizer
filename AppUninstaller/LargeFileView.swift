@@ -484,10 +484,10 @@ struct LargeFileView: View {
     korean: "정지",
     russian: "Остановить"
 ),
-                progress: 0.8, // Fake
+                progress: scanner.cleaningProgress,
                 showProgress: true,
                 action: {
-                    // Handle stop cleaning
+                    scanner.stopCleaning()
                 }
             )
             .padding(.bottom, 22)
@@ -556,7 +556,7 @@ struct LargeFileView: View {
                     HStack {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(.green)
-                        Text(loc.text("\(ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)) 已移除", "\(ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)) Removed"))
+                        Text(loc.text("\(ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)) 已移至废纸篓", "\(ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)) Moved to Trash"))
                             .font(.title2)
                             .fontWeight(.bold)
                     }

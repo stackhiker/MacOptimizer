@@ -593,7 +593,7 @@ struct ConsoleNetworkDetailView: View {
                 }.padding(.bottom, 20)
             }
         }
-        .onAppear { systemService.startMonitoring(); diagnose() }
+        .onAppear(perform: diagnose)
     }
 
     private func diagnose() {

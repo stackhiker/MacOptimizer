@@ -29,6 +29,14 @@ enum JunkType: String, CaseIterable, Identifiable {
     
     var id: String { rawValue }
 
+    var automaticallySelected: Bool {
+        switch self {
+        case .userCache, .systemCache, .userLogs, .systemLogs, .browserCache,
+             .appCache, .chatCache, .tempFiles, .crashReports: return true
+        default: return false
+        }
+    }
+
     var localizedName: String {
         let loc = LocalizationManager.shared
         switch self {
@@ -49,7 +57,7 @@ enum JunkType: String, CaseIterable, Identifiable {
         case .languageFiles: return loc.text(simplifiedChinese: "语言文件", traditionalChinese: "語言檔案", english: "Language Files", japanese: "言語ファイル", korean: "언어 파일", russian: "Языковые файлы")
         case .deletedUsers: return loc.text(simplifiedChinese: "已删除用户", traditionalChinese: "已刪除的使用者", english: "Deleted Users", japanese: "削除済みユーザー", korean: "삭제된 사용자", russian: "Удалённые пользователи")
         case .iosBackups: return loc.text(simplifiedChinese: "iOS 设备备份", traditionalChinese: "iOS 裝置備份", english: "iOS Device Backups", japanese: "iOSデバイスのバックアップ", korean: "iOS 기기 백업", russian: "Резервные копии iOS")
-        case .oldUpdates: return loc.text(simplifiedChinese: "旧更新", traditionalChinese: "舊版更新", english: "Old Updates", japanese: "古いアップデート", korean: "이전 업데이트", russian: "Старые обновления")
+        case .oldUpdates: return loc.text("安装残留与旧备份", "Installation Residues & Backups")
         case .documentVersions: return loc.text(simplifiedChinese: "文稿版本", traditionalChinese: "文件版本", english: "Document Versions", japanese: "書類のバージョン", korean: "문서 버전", russian: "Версии документов")
         case .downloads: return loc.text(simplifiedChinese: "下载", traditionalChinese: "下載項目", english: "Downloads", japanese: "ダウンロード", korean: "다운로드", russian: "Загрузки")
         }
@@ -75,7 +83,7 @@ enum JunkType: String, CaseIterable, Identifiable {
         case .languageFiles: return loc.text(simplifiedChinese: "当前不使用的应用程序语言包", traditionalChinese: "目前未使用的應用程式語言套件", english: "Application language resources not currently in use", japanese: "現在使用していないアプリの言語リソース", korean: "현재 사용하지 않는 앱 언어 리소스", russian: "Неиспользуемые языковые ресурсы приложений")
         case .deletedUsers: return loc.text(simplifiedChinese: "已删除用户留下的数据", traditionalChinese: "已刪除使用者留下的資料", english: "Data left behind by deleted user accounts", japanese: "削除済みユーザーアカウントの残存データ", korean: "삭제된 사용자 계정의 잔여 데이터", russian: "Данные, оставшиеся от удалённых учётных записей")
         case .iosBackups: return loc.text(simplifiedChinese: "存储在本机的 iOS 设备备份", traditionalChinese: "儲存在本機的 iOS 裝置備份", english: "iOS device backups stored on this Mac", japanese: "このMacに保存されたiOSデバイスのバックアップ", korean: "이 Mac에 저장된 iOS 기기 백업", russian: "Резервные копии устройств iOS на этом Mac")
-        case .oldUpdates: return loc.text(simplifiedChinese: "已经安装的软件更新包", traditionalChinese: "已安裝的軟體更新套件", english: "Software update packages that are already installed", japanese: "インストール済みのソフトウェアアップデートパッケージ", korean: "이미 설치된 소프트웨어 업데이트 패키지", russian: "Пакеты уже установленных обновлений")
+        case .oldUpdates: return loc.text("旧安装暂存与回滚副本，确认不再需要后再选择。", "Old installation files and rollback copies. Select only after review.")
         case .documentVersions: return loc.text(simplifiedChinese: "文稿的旧版本历史记录", traditionalChinese: "文件的舊版本歷史記錄", english: "History of older document versions", japanese: "書類の古いバージョン履歴", korean: "문서의 이전 버전 기록", russian: "История предыдущих версий документов")
         case .downloads: return loc.text(simplifiedChinese: "下载文件夹中的文件", traditionalChinese: "下載項目檔案夾中的檔案", english: "Files in the Downloads folder", japanese: "ダウンロードフォルダ内のファイル", korean: "다운로드 폴더의 파일", russian: "Файлы в папке «Загрузки»")
         }
@@ -128,7 +136,7 @@ enum JunkType: String, CaseIterable, Identifiable {
         case .languageFiles: return "不使用的应用程序语言包"
         case .deletedUsers: return "已删除用户的残留数据"
         case .iosBackups: return "iOS 设备备份文件"
-        case .oldUpdates: return "已安装的软件更新包"
+        case .oldUpdates: return "旧安装暂存与回滚副本，需确认"
         // brokenPreferences 已移除 - 不再扫描系统偏好设置
         case .documentVersions: return "旧版本的文档历史记录"
         case .downloads: return "下载文件夹中的文件"
@@ -138,11 +146,8 @@ enum JunkType: String, CaseIterable, Identifiable {
     var searchPaths: [String] {
         // SAFETY: Only scan user home (~/) paths. NEVER scan system paths.
         switch self {
-        case .userCache: 
-            return [
-                "~/Library/Saved Application State",
-                "~/Library/Cookies"
-            ]
+        case .userCache:
+            return ["~/Library/Caches"]
         case .systemCache:
             // 扫描用户级别的系统缓存
             return [
@@ -199,7 +204,6 @@ enum JunkType: String, CaseIterable, Identifiable {
                 "~/Library/Caches/com.tencent.qq",
                 // Telegram
                 "~/Library/Caches/ru.keepcoder.Telegram",
-                "~/Library/Application Support/Telegram Desktop",
                 // Slack
                 "~/Library/Caches/com.tinyspeck.slackmacgap",
                 "~/Library/Application Support/Slack/Service Worker/CacheStorage",
@@ -213,7 +217,6 @@ enum JunkType: String, CaseIterable, Identifiable {
                 // Line
                 "~/Library/Caches/jp.naver.line.mac",
                 // iMessage 附件（可选择性清理）
-                "~/Library/Messages/Attachments"
             ]
         case .mailAttachments:
             return [
@@ -237,16 +240,11 @@ enum JunkType: String, CaseIterable, Identifiable {
                 "~/Library/Caches/CloudKit",
                 "~/Library/Caches/GeoServices",
                 "~/Library/Caches/com.apple.parsecd",
-                "~/Downloads/*.dmg",
-                "~/Downloads/*.pkg",
-                "~/Downloads/*.zip"
             ]
         case .xcodeDerivedData: 
             return [
                 "~/Library/Developer/Xcode/DerivedData",
-                "~/Library/Developer/Xcode/Archives",
                 "~/Library/Developer/CoreSimulator/Caches",
-                "~/Library/Developer/CoreSimulator/Devices",
                 "~/Library/Developer/Xcode/iOS DeviceSupport",
                 "~/Library/Developer/Xcode/watchOS DeviceSupport",
                 "~/Library/Developer/Xcode/tvOS DeviceSupport",
@@ -257,16 +255,13 @@ enum JunkType: String, CaseIterable, Identifiable {
                 "~/.npm/_cacache",
                 "~/.npm/_logs",
                 "~/Library/Caches/Yarn",
-                "~/Library/pnpm",
                 // Gradle/Maven
                 "~/.gradle/caches",
-                "~/.m2/repository",
                 // Homebrew
                 "~/Library/Caches/Homebrew",
                 // pip
                 "~/Library/Caches/pip",
                 // Ruby/Gem
-                "~/.gem",
                 // Go
                 "~/go/pkg/mod/cache"
             ]
@@ -280,14 +275,14 @@ enum JunkType: String, CaseIterable, Identifiable {
         case .languageFiles:
             return [] // Custom logic
         case .deletedUsers:
-            return ["/Users/Deleted Users"]
+            return [] // Account data is not disposable junk.
         case .iosBackups:
-            return ["~/Library/Application Support/MobileSync/Backup"]
+            return [] // Device backups require a dedicated review workflow.
         case .oldUpdates:
-            return ["/Library/Updates"]
+            return [] // InstallationResidueScanner owns the exact roots and rules.
         // brokenPreferences 已移除 - 不再扫描系统偏好设置
         case .documentVersions:
-            return ["/.DocumentRevisions-V100"] 
+            return [] // Document history must not be classified as junk.
         case .downloads:
             return ["~/Downloads"]
         }
@@ -302,15 +297,19 @@ class JunkItem: Identifiable, ObservableObject, @unchecked Sendable {
     let contextPath: URL? // Path for the actual operation (e.g., binary to strip), while `path` is for display (App Bundle)
     let customName: String? // Optional custom display name
     let size: Int64
+    let installationResidue: InstallationResidue?
     @Published var isSelected: Bool = true
     @Published var cleanupRecommendation: CleanupAdvice? = nil
     
-    init(type: JunkType, path: URL, size: Int64, contextPath: URL? = nil, customName: String? = nil) {
+    init(type: JunkType, path: URL, size: Int64, contextPath: URL? = nil, customName: String? = nil,
+         installationResidue: InstallationResidue? = nil) {
         self.type = type
         self.path = path
         self.size = size
         self.contextPath = contextPath
         self.customName = customName
+        self.installationResidue = installationResidue
+        self.isSelected = installationResidue == nil && type.automaticallySelected
     }
     
     var name: String {
@@ -356,6 +355,53 @@ class JunkCleaner: ObservableObject {
     private let fileManager = FileManager.default
     private var mailScanGeneration = UUID()
     private var stopMailCleaningRequested = false
+    var mailCleaningWasStopped: Bool { stopMailCleaningRequested }
+    private var scanTask: Task<Void, Never>?
+    private var mailScanTask: Task<Void, Never>?
+    private var cleanupIsActive = false
+    private let scanOverride: ((JunkType) async -> ([JunkItem], Bool))?
+    private let deleteFile: (URL) async throws -> Void
+    private let deletionAllowed: (URL, Bool) -> Bool
+    private let recordFailure: (RemovalFailure) -> Void
+    private let scanInstallationResidues: () async -> [InstallationResidue]
+    private let validateInstallationResidue: (InstallationResidue) async -> Bool
+    @Published var deletionFailures: [RemovalFailure] = []
+    @Published var diskSpaceChange: Int64?
+    @Published var cleanedItemCount = 0
+
+    init(scanType: ((JunkType) async -> ([JunkItem], Bool))? = nil,
+         deleteFile: @escaping (URL) async throws -> Void = {
+             try DeletionLogService.shared.trashItem(at: $0, category: "JunkClean")
+         }, deletionAllowed: @escaping (URL, Bool) -> Bool = {
+             SafetyGuard.shared.isSafeToDelete($0, ignoreProtection: $1)
+         }, recordFailure: @escaping (RemovalFailure) -> Void = {
+             DeletionLogService.shared.logFailure($0, category: "JunkClean")
+         }, scanInstallationResidues: @escaping () async -> [InstallationResidue] = {
+             await InstallationResidueScanner().scan()
+         }, validateInstallationResidue: @escaping (InstallationResidue) async -> Bool = {
+             await SafetyGuard.shared.isSafeToDeleteInstallationResidue($0)
+         }) {
+        self.scanOverride = scanType
+        self.deleteFile = deleteFile
+        self.deletionAllowed = deletionAllowed
+        self.recordFailure = recordFailure
+        self.scanInstallationResidues = scanInstallationResidues
+        self.validateInstallationResidue = validateInstallationResidue
+    }
+
+    static func uniqueItems(_ items: [JunkItem]) -> [JunkItem] {
+        var byPath: [String: JunkItem] = [:]
+        for item in items where byPath[item.path.standardizedFileURL.path] == nil {
+            byPath[item.path.standardizedFileURL.path] = item
+        }
+        return CleanupFileSystem.uniqueRoots(items.map(\.path)).compactMap { byPath[$0.path] }
+    }
+
+    static func shouldSelectByDefault(_ item: JunkItem) -> Bool {
+        guard item.installationResidue == nil, item.type.automaticallySelected else { return false }
+        if let advice = item.cleanupRecommendation { return advice.decision == .recommended }
+        return true
+    }
     
     var totalSize: Int64 {
         junkItems.reduce(0) { $0 + $1.size }
@@ -368,6 +414,13 @@ class JunkCleaner: ObservableObject {
     /// 重置所有状态
     @MainActor
     func reset() {
+        guard scanTask == nil, mailScanTask == nil, !cleanupIsActive else {
+            scanTask?.cancel()
+            mailScanTask?.cancel()
+            stopCleaningRequested = true
+            stopMailCleaningRequested = true
+            return
+        }
         junkItems.removeAll()
         isScanning = false
         isAnalyzingRecommendations = false
@@ -387,6 +440,11 @@ class JunkCleaner: ObservableObject {
     /// Reset only the Mail Attachments module without discarding System Junk results.
     @MainActor
     func resetMailAttachments() {
+        guard mailScanTask == nil, !cleanupIsActive else {
+            mailScanTask?.cancel()
+            stopMailCleaningRequested = true
+            return
+        }
         mailScanGeneration = UUID()
         junkItems.removeAll { $0.type == .mailAttachments }
         isScanningMailAttachments = false
@@ -399,58 +457,50 @@ class JunkCleaner: ObservableObject {
         stopMailCleaningRequested = false
     }
 
-    /// Scan only locally recoverable mail downloads. This state is deliberately
-    /// independent from the broader System Junk scan.
+    /// Mail scans share operation ownership with the general scanner.
+    @MainActor
     func scanMailAttachments() async {
-        let generation = await MainActor.run { () -> UUID in
-            let value = UUID()
-            mailScanGeneration = value
-            junkItems.removeAll { $0.type == .mailAttachments }
-            isScanningMailAttachments = true
-            hasScannedMailAttachments = false
-            mailScanProgress = 0.08
-            mailAttachmentsHavePermissionError = false
-            mailCleanedSize = 0
-            return value
-        }
-
-        let startedAt = Date()
-        let (items, permissionError) = await scanTypeConcurrent(.mailAttachments)
-
-        await MainActor.run {
-            guard mailScanGeneration == generation else { return }
-            mailScanProgress = 0.82
-        }
-
-        let elapsed = Date().timeIntervalSince(startedAt)
-        if elapsed < 1.15 {
-            try? await Task.sleep(nanoseconds: UInt64((1.15 - elapsed) * 1_000_000_000))
-        }
-
-        await MainActor.run {
-            guard mailScanGeneration == generation else { return }
-            items.forEach { $0.isSelected = true }
-            junkItems.append(contentsOf: items.sorted { $0.size > $1.size })
+        guard scanTask == nil, mailScanTask == nil, !cleanupIsActive else { return }
+        isScanningMailAttachments = true
+        hasScannedMailAttachments = false
+        mailAttachmentsHavePermissionError = false
+        junkItems.removeAll { $0.type == .mailAttachments }
+        let task = Task {
+            let (items, permissionError) = await scanTypeConcurrent(.mailAttachments)
+            guard !Task.isCancelled else { return }
+            junkItems.append(contentsOf: Self.uniqueItems(items).sorted { $0.size > $1.size })
             mailAttachmentsHavePermissionError = permissionError
             mailScanProgress = 1
             hasScannedMailAttachments = true
-            isScanningMailAttachments = false
         }
+        mailScanTask = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        mailScanTask = nil
+        isScanningMailAttachments = false
     }
 
     @MainActor
     func stopMailAttachmentsScan() {
-        mailScanGeneration = UUID()
-        isScanningMailAttachments = false
-        hasScannedMailAttachments = true
-        mailScanProgress = 0
+        mailScanTask?.cancel()
     }
 
     /// Clean only selected mail attachments, keeping all unrelated module
     /// selections untouched.
+    @MainActor
     func cleanSelectedMailAttachments() async -> (cleaned: Int64, failed: Int64) {
+        guard !cleanupIsActive, scanTask == nil, mailScanTask == nil else { return (0, 0) }
+        cleanupIsActive = true
+        deletionFailures = []
+        cleanedItemCount = 0
+        diskSpaceChange = nil
+        let before = CleanupDiskSnapshot.capture()
+        defer {
+            cleanupIsActive = false
+            isCleaningMailAttachments = false
+            diskSpaceChange = CleanupDiskSnapshot.capture()?.change(since: before)
+        }
         let selectedItems = await MainActor.run {
-            junkItems.filter { $0.type == .mailAttachments && $0.isSelected }
+            Self.uniqueItems(junkItems.filter { $0.type == .mailAttachments && $0.isSelected })
         }
 
         await MainActor.run {
@@ -465,11 +515,12 @@ class JunkCleaner: ObservableObject {
         var cleanedIDs = Set<UUID>()
 
         for (index, item) in selectedItems.enumerated() {
-            if await MainActor.run(body: { stopMailCleaningRequested }) { break }
+            if stopMailCleaningRequested || Task.isCancelled { break }
 
             if await deleteItem(item) {
                 cleaned += item.size
                 cleanedIDs.insert(item.id)
+                cleanedItemCount += 1
             } else {
                 failed += item.size
             }
@@ -484,7 +535,9 @@ class JunkCleaner: ObservableObject {
 
         let completedIDs = cleanedIDs
         await MainActor.run {
-            junkItems.removeAll { completedIDs.contains($0.id) }
+            junkItems.removeAll { item in
+                selectedItems.contains { selected in completedIDs.contains(selected.id) && CleanupFileSystem.contains(item.path, in: selected.path) }
+            }
             isCleaningMailAttachments = false
             DiskSpaceManager.shared.updateDiskSpace()
         }
@@ -495,98 +548,72 @@ class JunkCleaner: ObservableObject {
     @MainActor
     func stopMailAttachmentsCleaning() {
         stopMailCleaningRequested = true
-        isCleaningMailAttachments = false
     }
     
-    /// 停止扫描
+    /// Keep ownership until all children have observed cancellation.
     @MainActor
     func stopScanning() {
-        isScanning = false
+        scanTask?.cancel()
+    }
+
+    @MainActor
+    func stopCleaning() {
+        stopCleaningRequested = true
+    }
+
+    @MainActor
+    func scanJunk() async {
+        guard scanTask == nil, mailScanTask == nil, !cleanupIsActive else { return }
+        isScanning = true
+        isAnalyzingRecommendations = false
+        junkItems.removeAll()
+        categoryCleanedSize.removeAll()
         scanProgress = 0
+        hasPermissionErrors = false
+        let task = Task { await self.performScan() }
+        scanTask = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        scanTask = nil
+        isScanning = false
+        isAnalyzingRecommendations = false
         currentScanningPath = ""
         currentScanningCategory = ""
     }
 
-    /// 请求在当前文件处理完成后停止清理，并保留尚未处理的项目。
-    @MainActor
-    func stopCleaning() {
-        stopCleaningRequested = true
-        isCleaning = false
+    private func scanCategory(_ type: JunkType) async -> ([JunkItem], Bool) {
+        if let scanOverride { return await scanOverride(type) }
+        return await scanTypeConcurrent(type)
     }
-    
-    /// 扫描所有垃圾 - 使用多线程并发扫描优化
-    func scanJunk() async {
-        await MainActor.run {
-            isScanning = true
-            isCleaning = false
-            isAnalyzingRecommendations = false
-            junkItems.removeAll()
-            categoryCleanedSize.removeAll()
-            scanProgress = 0
-            hasPermissionErrors = false // Reset errors
-        }
-        
-        let startTime = Date()
-        
-        // Remove exclusions to matching design requirement. Use safe scanning where possible.
-        // Note: documentVersions and oldUpdates might require admin permissions (handled by sudo fallback or error reporting)
-        let safeTypes = JunkType.allCases
-        let totalTypes = safeTypes.count
-        let progressTracker = ScanProgressTracker()
-        await progressTracker.setTotalTasks(totalTypes)
-        
-        // 使用 TaskGroup 并发扫描所有垃圾类型
-        await withTaskGroup(of: (JunkType, ([JunkItem], Bool)).self) { group in
-            for type in safeTypes {
-                group.addTask {
-                    let (typeItems, hasError) = await self.scanTypeConcurrent(type)
-                    return (type, (typeItems, hasError))
+
+    private func performScan() async {
+        let types = JunkType.allCases
+        var completed = 0
+        var iterator = types.makeIterator()
+        await withTaskGroup(of: ([JunkItem], Bool).self) { group in
+            for _ in 0..<min(4, types.count) {
+                if let type = iterator.next() {
+                    group.addTask { await self.scanCategory(type) }
                 }
             }
-            
-            // 收集结果并更新进度 - 实时更新 junkItems 以显示累计大小
-            for await (_, (typeItems, hasError)) in group {
-                if hasError {
-                    await MainActor.run { self.hasPermissionErrors = true }
-                }
-                
-                // 实时追加结果到 junkItems（使 totalSize 实时更新）
-                if !typeItems.isEmpty {
-                    await MainActor.run {
-                        for item in typeItems {
-                            item.isSelected = true
-                        }
-                        self.junkItems.append(contentsOf: typeItems.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
-                    }
-                }
-                
-                await progressTracker.completeTask()
-                
-                let progress = await progressTracker.getProgress()
+            while let (items, error) = await group.next() {
+                guard !Task.isCancelled else { group.cancelAll(); break }
+                completed += 1
+                let progress = Double(completed) / Double(types.count)
                 await MainActor.run {
+                    self.hasPermissionErrors = self.hasPermissionErrors || error
+                    self.junkItems = Self.uniqueItems(self.junkItems + items.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
                     self.scanProgress = progress
                 }
+                if let type = iterator.next() {
+                    group.addTask { await self.scanCategory(type) }
+                }
             }
         }
-        
-        // 排序：按大小降序
-        await MainActor.run {
-            self.junkItems.sort { $0.size > $1.size }
-        }
-        
-        // Ensure minimum 2 seconds scanning time for better UX
-        let elapsed = Date().timeIntervalSince(startTime)
-        if elapsed < 2.0 {
-            try? await Task.sleep(nanoseconds: UInt64((2.0 - elapsed) * 1_000_000_000))
-        }
-
-        await MainActor.run {
-            isScanning = false
-        }
-        
+        guard !Task.isCancelled else { return }
+        await MainActor.run { self.junkItems.sort { $0.size > $1.size } }
         await analyzeCleanupRecommendations()
     }
-    
+
     private func analyzeCleanupRecommendations() async {
         let items = await MainActor.run { self.junkItems }
         guard !items.isEmpty else { return }
@@ -599,427 +626,106 @@ class JunkCleaner: ObservableObject {
         }
         
         let recommendations = await CleanupAdvisorService.shared.analyze(items: items)
+        guard !Task.isCancelled else { return }
         
         await MainActor.run {
             for item in self.junkItems {
                 guard let recommendation = recommendations[item.id] else { continue }
                 item.cleanupRecommendation = recommendation
-                if recommendation.decision == .keep {
-                    item.isSelected = false
-                }
+                item.isSelected = Self.shouldSelectByDefault(item)
             }
             self.isAnalyzingRecommendations = false
             self.objectWillChange.send()
         }
     }
     
-    /// 并发扫描单个类型 - 优化版，并行处理多个搜索路径
+    /// Roots and entries are streamed inside each of at most four category tasks.
     private func scanTypeConcurrent(_ type: JunkType) async -> ([JunkItem], Bool) {
-        let searchPaths = type.searchPaths
-        var hasError = false
-        // 预先获取已安装应用列表，仅在需要时获取 (Localizations 等可能需要)
-        // brokenPreferences 已移除，不再需要 installedBundleIds
-        
-        // 使用 TaskGroup 并行扫描多个路径
-        var allItems: [JunkItem] = []
-        
-        await withTaskGroup(of: ([JunkItem], Bool).self) { group in
-            for pathStr in searchPaths {
-                group.addTask {
-                    let expandedPath = NSString(string: pathStr).expandingTildeInPath
-                    let url = URL(fileURLWithPath: expandedPath)
-                    
-                    await MainActor.run { 
-                        self.currentScanningPath = expandedPath
-                        self.currentScanningCategory = type.localizedName
-                    }
-                    
-                    guard self.fileManager.fileExists(atPath: url.path) else { return ([], false) }
-                    
-                    var items: [JunkItem] = []
-                    
-                    // --- 特殊类型的专门处理逻辑 ---
-                    
-                    if type == .universalBinaries {
-                        // ⚠️ 功能已禁用：通用二进制瘦身会修改应用本身
-                        // 根据安全原则，应用相关功能只能清理缓存和垃圾，不能修改应用
-                        // 修改应用二进制文件会导致：
-                        // - 破坏代码签名
-                        // - 破坏 App Store 应用
-                        // - 破坏公证（Notarization）
-                        // - 触发 GateKeeper 警告
-                        print("[JunkCleaner] universalBinaries DISABLED for safety - modifying app binaries breaks signatures")
-                        return ([], false)
-                    }
-                    
-                    if type == .unusedDiskImages {
-                        // 递归扫描目录寻找 .dmg / .iso
-                        if let enumerator = self.fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .contentAccessDateKey], options: [.skipsHiddenFiles]) {
-                            while let fileURL = enumerator.nextObject() as? URL {
-                                if Int.random(in: 0...50) == 0 { 
-                                    await MainActor.run { 
-                                        self.currentScanningPath = fileURL.path 
-                                        self.currentScanningCategory = type.localizedName
-                                    } 
-                                } // Throttle updates
-                                let ext = fileURL.pathExtension.lowercased()
-                                if ["dmg", "iso", "pkg"].contains(ext) {
-                                    if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0 {
-                                        items.append(JunkItem(type: type, path: fileURL, size: Int64(size)))
-                                    }
-                                }
-                            }
-                        }
-                        return (items, false)
-                    }
-                    
-                    // brokenPreferences 已移除 - 不再扫描任何偏好设置
+        if type == .universalBinaries || type == .languageFiles { return ([], false) }
+        if type == .oldUpdates {
+            let candidates = await scanInstallationResidues()
+            guard !Task.isCancelled else { return ([], false) }
+            return (candidates.filter { ScanResultIgnoreStore.shouldInclude($0.url) }.map {
+                JunkItem(type: .oldUpdates, path: $0.url, size: $0.size,
+                         customName: $0.name, installationResidue: $0)
+            }, false)
+        }
+        var items: [JunkItem] = []
+        var permissionError = false
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey]
+        for path in type.searchPaths {
+            guard !Task.isCancelled else { break }
+            let root = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
+            await MainActor.run {
+                self.currentScanningPath = root.path
+                self.currentScanningCategory = type.localizedName
+            }
+            guard fileManager.fileExists(atPath: root.path) else { continue }
+            // Inspect permission errors instead of silently claiming a complete scan.
+            var errors: [NSError] = []
+            guard let entries = fileManager.enumerator(at: root, includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { _, error in
+                    errors.append(error as NSError)
+                    return !Task.isCancelled
+                }) else { continue }
+            for case let url as URL in entries {
+                guard !Task.isCancelled else { break }
+                guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+                if values.isSymbolicLink == true { entries.skipDescendants(); continue }
+                if InstallationResidueScanner.excludesGenericCleanup(url) {
+                    // Recursive disk-image discovery may pass through an ancestor,
+                    // but must never enter a managed runtime/backup root itself.
+                    let ancestorOnly = values.isDirectory == true &&
+                        InstallationResidueScanner.managedRootPaths.contains { $0.hasPrefix(url.path + "/") }
+                    if type != .unusedDiskImages || !ancestorOnly { entries.skipDescendants() }
+                    continue
+                }
+                if type != .unusedDiskImages { entries.skipDescendants() }
+                if type == .unusedDiskImages {
+                    guard values.isRegularFile == true,
+                          ["dmg", "iso", "pkg"].contains(url.pathExtension.lowercased()),
+                          let modified = values.contentModificationDate,
+                          modified < Date().addingTimeInterval(-30 * 86400) else { continue }
+                }
+                if type == .brokenLoginItems {
+                    guard url.pathExtension == "plist", let plist = NSDictionary(contentsOf: url) else { continue }
+                    let program = (plist["Program"] as? String) ?? (plist["ProgramArguments"] as? [String])?.first
+                    guard let program, program.hasPrefix("/"), !fileManager.fileExists(atPath: program) else { continue }
+                }
+                let size = await calculateSizeAsync(at: url)
+                if size > 0 { items.append(JunkItem(type: type, path: url, size: size)) }
+            }
+            permissionError = permissionError || errors.contains {
+                ($0.domain == NSCocoaErrorDomain && $0.code == NSFileReadNoPermissionError) ||
+                ($0.domain == NSPOSIXErrorDomain && [$0.code].contains(Int(EACCES)))
+            }
+        }
+        return (Self.uniqueItems(items).filter { ScanResultIgnoreStore.shouldInclude($0.path) }, permissionError)
+    }
 
-                    if type == .brokenLoginItems {
-                        // Scan ~/Library/LaunchAgents
-                        if let contents = try? self.fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-                            for fileURL in contents where fileURL.pathExtension == "plist" {
-                                // Parse plist to find the executable path
-                                if let dict = NSDictionary(contentsOf: fileURL),
-                                   let programArguments = dict["ProgramArguments"] as? [String],
-                                   let executablePath = programArguments.first {
-                                    
-                                    // Check if executable exists
-                                    if !self.fileManager.fileExists(atPath: executablePath) {
-                                        // It's broken!
-                                        if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                                             items.append(JunkItem(type: type, path: fileURL, size: Int64(size)))
-                                        }
-                                    }
-                                } else if let dict = NSDictionary(contentsOf: fileURL),
-                                          let program = dict["Program"] as? String {
-                                     // Check Program key
-                                     if !self.fileManager.fileExists(atPath: program) {
-                                         if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                                             items.append(JunkItem(type: type, path: fileURL, size: Int64(size)))
-                                         }
-                                     }
-                                }
-                            }
-                        }
-                        return (items, false)
-                    }
-                    
-                    if type == .downloads {
-                        // Just list top-level files in Downloads for user review, or maybe old ones?
-                        // Design implies "Downloads" is just a category. Let's list all files in Downloads.
-                        // Ideally we should categorize them or filter by age, but for now scan them all.
-                        if let contents = try? self.fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
-                             for fileURL in contents {
-                                 if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0 {
-                                     items.append(JunkItem(type: type, path: fileURL, size: Int64(size)))
-                                 }
-                             }
-                        }
-                        return (items, false)
-                    }
-
-                    if type == .languageFiles {
-                         // ⚠️ 严重 BUG 修复：禁用此功能
-                         // 删除应用的 .lproj 文件会破坏 macOS 代码签名
-                         // 导致应用报告"已损坏"无法启动
-                         print("[JunkCleaner] languageFiles DISABLED for safety - deleting .lproj breaks app signatures")
-                         return ([], false)
-                         
-                         // 原始代码已禁用：
-                         /*
-                         // Adapting logic from SmartCleanerService
-                         // 1. Get preferred languages
-                         var keepLanguages: Set<String> = ["Base", "en", "English"]
-                         for lang in Locale.preferredLanguages {
-                             let parts = lang.split(separator: "-").map(String.init)
-                             if let languageCode = parts.first {
-                                 keepLanguages.insert(languageCode)
-                                 if parts.count > 1 {
-                                     let secondPart = parts[1]
-                                     if secondPart.count == 4 { // Script code like Hans
-                                         keepLanguages.insert("\(languageCode)-\(secondPart)")
-                                         keepLanguages.insert("\(languageCode)_\(secondPart)")
-                                     }
-                                 }
-                             }
-                             keepLanguages.insert(lang)
-                         }
-                         
-                         // 2. Scan Applications
-                         let appDirs = [
-                             "/Applications",
-                             self.fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path
-                         ]
-                         
-                         for appDir in appDirs {
-                             guard let apps = try? self.fileManager.contentsOfDirectory(atPath: appDir) else { continue }
-                             
-                             for appName in apps where appName.hasSuffix(".app") {
-                                 let appPath = (appDir as NSString).appendingPathComponent(appName)
-                                 let appURL = URL(fileURLWithPath: appPath)
-                                 
-                                 // Skip system apps
-                                 let plistPath = appURL.appendingPathComponent("Contents/Info.plist")
-                                 if let plist = NSDictionary(contentsOfFile: plistPath.path),
-                                    let bundleId = plist["CFBundleIdentifier"] as? String {
-                                     if bundleId.hasPrefix("com.apple.") { continue }
-                                 }
-                                 
-                                 // Skip App Store apps
-                                 let receiptPath = appURL.appendingPathComponent("Contents/_MASReceipt")
-                                 if self.fileManager.fileExists(atPath: receiptPath.path) { continue }
-                                 
-                                 let resourcesURL = appURL.appendingPathComponent("Contents/Resources")
-                                 guard let resources = try? self.fileManager.contentsOfDirectory(at: resourcesURL, includingPropertiesForKeys: nil) else { continue }
-                                 
-                                 for itemURL in resources where itemURL.pathExtension == "lproj" {
-                                     let langName = itemURL.deletingPathExtension().lastPathComponent
-                                     
-                                     let shouldKeep = keepLanguages.contains { keep in
-                                         if keep.lowercased() == langName.lowercased() { return true }
-                                         if langName.lowercased().hasPrefix(keep.lowercased()) { return true }
-                                         return false
-                                     }
-                                     
-                                     if !shouldKeep {
-                                         let size = await self.calculateSizeAsync(at: itemURL)
-                                         if size > 0 {
-                                             items.append(JunkItem(type: type, path: itemURL, size: size))
-                                         }
-                                     }
-                                 }
-                             }
-                         }
-                         return (items, false)
-                         */
-                    }
-                    
-                    if type == .appCache {
-                        // appCache 现在由 systemCache 处理 ~/Library/Caches
-                        // 不再单独扫描 Containers 以避免权限弹窗
-                        return (items, false)
-                    }
-                    
-                    // --- 通用扫描逻辑 (原有逻辑) ---
-                    
-                    do {
-                        let contents = try self.fileManager.contentsOfDirectory(
-                            at: url,
-                            includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
-                            options: [.skipsHiddenFiles]
-                        )
-                        
-                        // 并发计算每个子项的大小
-                        await withTaskGroup(of: JunkItem?.self) { sizeGroup in
-                            for fileUrl in contents {
-                                sizeGroup.addTask {
-                                    let size = await self.calculateSizeAsync(at: fileUrl)
-                                    if size > 0 {
-                                        return JunkItem(type: type, path: fileUrl, size: size)
-                                    }
-                                    return nil
-                                }
-                            }
-                            
-                            for await item in sizeGroup {
-                                if let item = item {
-                                    items.append(item)
-                                }
-                            }
-                        }
-                        return (items, false)
-                    } catch let error as NSError {
-                        // 只有真正的权限拒绝错误才标记为权限错误
-                        // 忽略目录不存在（NSFileReadNoSuchFileError = 260）等常见情况
-                        let isPermissionError = error.domain == NSCocoaErrorDomain && 
-                            (error.code == NSFileReadNoPermissionError || error.code == NSFileWriteNoPermissionError)
-                        return (items, isPermissionError)
-                    }
-                }
-            }
-            
-            for await (pathItems, error) in group {
-                allItems.append(contentsOf: pathItems)
-                if error { hasError = true }
-            }
-        }
-        
-        return (allItems.filter { ScanResultIgnoreStore.shouldInclude($0.path) }, hasError)
-    }
-    
-    // MARK: - 辅助分析方法
-    
-    /// 计算通用二进制文件瘦身可释放的空间
-    // calculateUniversalBinarySavings 已移除 - 通用二进制瘦身功能已禁用
-    
-    /// 获取所有已安装应用的 Bundle ID（改进版）
-    private func getAllInstalledAppBundleIds() -> Set<String> {
-        var bundleIds = Set<String>()
-        
-        // 1. 扫描标准应用目录
-        let appDirs = [
-            "/Applications",
-            "/System/Applications",
-            "/System/Applications/Utilities",
-            fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path
-        ]
-        
-        for appDir in appDirs {
-            if let apps = try? fileManager.contentsOfDirectory(atPath: appDir) {
-                for app in apps where app.hasSuffix(".app") {
-                    let appPath = "\(appDir)/\(app)"
-                    let plistPath = "\(appPath)/Contents/Info.plist"
-                    
-                    // 添加应用名称作为备用匹配
-                    let appName = (app as NSString).deletingPathExtension
-                    bundleIds.insert(appName.lowercased())
-                    
-                    if let plist = NSDictionary(contentsOfFile: plistPath),
-                       let bundleId = plist["CFBundleIdentifier"] as? String {
-                        bundleIds.insert(bundleId)
-                        bundleIds.insert(bundleId.lowercased())
-                        
-                        // 提取 Bundle ID 的最后组件
-                        if let lastComponent = bundleId.components(separatedBy: ".").last {
-                            bundleIds.insert(lastComponent.lowercased())
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 2. 添加 Homebrew Cask 应用
-        let homebrewPaths = ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"]
-        for caskPath in homebrewPaths {
-            if let casks = try? fileManager.contentsOfDirectory(atPath: caskPath) {
-                for cask in casks {
-                    bundleIds.insert(cask.lowercased())
-                }
-            }
-        }
-        
-        // 3. 添加正在运行的应用
-        for app in NSWorkspace.shared.runningApplications {
-            if let bundleId = app.bundleIdentifier {
-                bundleIds.insert(bundleId)
-                bundleIds.insert(bundleId.lowercased())
-            }
-            if let name = app.localizedName {
-                bundleIds.insert(name.lowercased())
-            }
-        }
-        
-        // 4. 添加系统安全名单
-        let systemSafelist = [
-            "com.apple", "apple", "google", "chrome", "microsoft", "firefox",
-            "adobe", "dropbox", "slack", "discord", "zoom", "telegram",
-            "wechat", "qq", "tencent", "jetbrains", "xcode", "safari"
-        ]
-        for safe in systemSafelist {
-            bundleIds.insert(safe)
-        }
-        
-        return bundleIds
-    }
-    
-    // 异步计算目录大小 (保留原有优化版)
-    private func calculateSizeAsync2(at url: URL) async -> Int64 {
-        // ... (kept for reference, actual implementation uses check below)
-        return await calculateSizeAsync(at: url)
-    }
-    
-    /// 异步计算目录大小 - 优化版
     private func calculateSizeAsync(at url: URL) async -> Int64 {
-        var totalSize: Int64 = 0
-        
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return 0 }
-        
-        if isDirectory.boolValue {
-            // 对于目录，收集所有文件然后批量计算
-            guard let enumerator = fileManager.enumerator(
-                at: url,
-                includingPropertiesForKeys: [.fileSizeKey],
-                options: [.skipsHiddenFiles]
-            ) else { return 0 }
-            
-            var fileURLs: [URL] = []
-            while let fileURL = enumerator.nextObject() as? URL {
-                fileURLs.append(fileURL)
-            }
-            
-            // 分块并发计算
-            let chunkSize = max(50, fileURLs.count / 4)
-            let chunks = stride(from: 0, to: fileURLs.count, by: chunkSize).map {
-                Array(fileURLs[$0..<min($0 + chunkSize, fileURLs.count)])
-            }
-            
-            await withTaskGroup(of: Int64.self) { group in
-                for chunk in chunks {
-                    group.addTask {
-                        var chunkTotal: Int64 = 0
-                        for fileURL in chunk {
-                            if let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey]),
-                               let size = values.fileSize {
-                                chunkTotal += Int64(size)
-                            }
-                        }
-                        return chunkTotal
-                    }
-                }
-                
-                for await size in group {
-                    totalSize += size
-                }
-            }
-        } else {
-            if let attributes = try? fileManager.attributesOfItem(atPath: url.path),
-               let size = attributes[.size] as? UInt64 {
-                totalSize = Int64(size)
-            }
-        }
-        
-        return totalSize
+        CleanupFileSystem.logicalSize(at: url, shouldCancel: { Task.isCancelled })
     }
-    
-    /// 清理选中的垃圾
-    func cleanSelected() async -> (cleaned: Int64, failed: Int64, requiresAdmin: Bool) {
-        var cleanedSize: Int64 = 0
-        var failedSize: Int64 = 0
-        var needsAdmin = false
-        let selectedItems = junkItems.filter { $0.isSelected }
-        var failedItems: [JunkItem] = []
-        
-        // 处理所有选中的文件
-        for item in selectedItems {
-            let success = await deleteItem(item)
-            if success {
-                cleanedSize += item.size
-            } else {
-                failedSize += item.size
-                failedItems.append(item)
-            }
-        }
-        
-        needsAdmin = !failedItems.isEmpty
 
-        await MainActor.run { [failedItems] in
-            self.junkItems.removeAll { item in
-                selectedItems.contains { $0.id == item.id } && !failedItems.contains { $0.id == item.id }
-            }
-            // 更新磁盘空间显示
-            DiskSpaceManager.shared.updateDiskSpace()
-        }
-        
-        // 注意：清理完成后不再重新扫描，否则会导致UI显示0KB释放空间
-        // 因为上面已经从 junkItems 中移除了已清理的项目
-        
-        return (cleanedSize, failedSize, needsAdmin)
+    func cleanSelected() async -> (cleaned: Int64, failed: Int64, requiresAdmin: Bool) {
+        await cleanSelectedByCategory()
     }
-    
+
     /// 逐分类清理选中的垃圾 - 按设计图要求逐个分类清理并显示进度
+    @MainActor
     func cleanSelectedByCategory() async -> (cleaned: Int64, failed: Int64, requiresAdmin: Bool) {
+        guard !cleanupIsActive, scanTask == nil, mailScanTask == nil else { return (0, 0, false) }
+        cleanupIsActive = true
+        isCleaning = true
+        deletionFailures = []
+        cleanedItemCount = 0
+        diskSpaceChange = nil
+        let before = CleanupDiskSnapshot.capture()
+        defer {
+            diskSpaceChange = CleanupDiskSnapshot.capture()?.change(since: before)
+            cleanupIsActive = false
+            isCleaning = false
+        }
         var totalCleanedSize: Int64 = 0
         var totalFailedSize: Int64 = 0
         var needsAdmin = false
@@ -1030,7 +736,7 @@ class JunkCleaner: ObservableObject {
         }
         
         // 1. 获取所有有选中项目的分类（按大小降序排列）
-        let selectedItems = junkItems.filter { $0.isSelected }
+        let selectedItems = Self.uniqueItems(junkItems.filter { $0.isSelected })
         let categorySizes: [JunkType: Int64] = Dictionary(grouping: selectedItems, by: { $0.type })
             .mapValues { items in items.reduce(0) { $0 + $1.size } }
         
@@ -1047,7 +753,7 @@ class JunkCleaner: ObservableObject {
         
         // 3. 逐个分类清理
         for category in sortedCategories {
-            if await MainActor.run(body: { self.stopCleaningRequested }) { break }
+            if stopCleaningRequested || Task.isCancelled { break }
 
             await MainActor.run {
                 self.currentCleaningCategory = category
@@ -1061,13 +767,14 @@ class JunkCleaner: ObservableObject {
             
             // 清理该分类的所有文件
             for item in categoryItems {
-                if await MainActor.run(body: { self.stopCleaningRequested }) { break }
+                if stopCleaningRequested || Task.isCancelled { break }
 
                 let success = await deleteItem(item)
                 if success {
                     categoryCleanedSize += item.size
                     totalCleanedSize += item.size
                     cleanedItemIDs.insert(item.id)
+                    cleanedItemCount += 1
                 } else {
                     totalFailedSize += item.size
                     categoryFailedItems.append(item)
@@ -1094,7 +801,7 @@ class JunkCleaner: ObservableObject {
         let completedItemIDs = cleanedItemIDs
         await MainActor.run {
             self.junkItems.removeAll { item in
-                completedItemIDs.contains(item.id)
+                selectedItems.contains { selected in completedItemIDs.contains(selected.id) && CleanupFileSystem.contains(item.path, in: selected.path) }
             }
             self.currentCleaningCategory = nil
             DiskSpaceManager.shared.updateDiskSpace()
@@ -1106,73 +813,33 @@ class JunkCleaner: ObservableObject {
     /// 检查应用是否可以安全瘦身
     // canSafelyThinApp、thinUniversalBinary、reSignApp 已移除 - 通用二进制瘦身功能已禁用
     
-    /// 删除单个项目
+    /// Safety refusals and filesystem failures remain visible with their real reason.
     private func deleteItem(_ item: JunkItem) async -> Bool {
-        // ⚠️ 安全修复: 使用SafetyGuard检查
-        if !SafetyGuard.shared.isSafeToDelete(item.path) {
-            print("[JunkCleaner] 🛡️ SafetyGuard blocked deletion: \(item.path.path)")
-            return false
-        }
-        
-        // 🛡️ 使用 DeletionLogService 记录删除日志，支持恢复
-        if DeletionLogService.shared.logAndDelete(at: item.path, category: "JunkClean") {
-            print("[JunkCleaner] ✅ Moved to trash with log: \(item.path.lastPathComponent)")
-            return true
-        } else {
-            print("[JunkCleaner] ⚠️ Failed to delete: \(item.path.lastPathComponent)")
-            return false
-        }
-    }
-    
-    private func scanType(_ type: JunkType) async -> [JunkItem] {
-        var items: [JunkItem] = []
-        
-        for pathStr in type.searchPaths {
-            let expandedPath = NSString(string: pathStr).expandingTildeInPath
-            let url = URL(fileURLWithPath: expandedPath)
-            
-            guard fileManager.fileExists(atPath: url.path) else { continue }
-            
-            // 对于 Caches 和 Logs，我们扫描子文件夹
-            // 对于 Trash，扫描子文件
-            do {
-                let contents = try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey], options: [.skipsHiddenFiles])
-                
-                for fileUrl in contents {
-                    let size = calculateSize(at: fileUrl)
-                    if size > 0 {
-                        items.append(JunkItem(type: type, path: fileUrl, size: size))
-                    }
-                }
-            } catch {
-                print("Error scanning \(url.path): \(error)")
-            }
-        }
-        
-        return items
-    }
-    
-    private func calculateSize(at url: URL) -> Int64 {
-        var totalSize: Int64 = 0
-        
-        var isDirectory: ObjCBool = false
-        if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-            if isDirectory.boolValue {
-                guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
-                for case let fileURL as URL in enumerator {
-                    do {
-                        let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey])
-                        totalSize += Int64(resourceValues.fileSize ?? 0)
-                    } catch { continue }
-                }
+        do {
+            let explicitUserFile = item.type == .downloads || item.type == .unusedDiskImages || item.type == .mailAttachments
+            let allowed: Bool
+            if let residue = item.installationResidue {
+                allowed = item.type == .oldUpdates && item.contextPath == nil &&
+                    item.path.standardizedFileURL == residue.url.standardizedFileURL
+                    ? await validateInstallationResidue(residue) : false
             } else {
-                do {
-                    let attributes = try fileManager.attributesOfItem(atPath: url.path)
-                    totalSize = Int64(attributes[.size] as? UInt64 ?? 0)
-                } catch { return 0 }
+                allowed = !InstallationResidueScanner.excludesGenericCleanup(item.path) &&
+                    deletionAllowed(item.path, explicitUserFile)
             }
+            guard allowed else {
+                throw NSError(domain: "CleanupSafety", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                    LocalizationManager.shared.text("此项目受保护或仍在使用，已保留。", "This item is protected or in use and was retained.")])
+            }
+            let stopped = isCleaningMailAttachments ? stopMailCleaningRequested : stopCleaningRequested
+            guard !stopped, !Task.isCancelled else { return false }
+            try await deleteFile(item.path)
+            return true
+        } catch {
+            let failure = RemovalFailure(path: item.path, error: error)
+            recordFailure(failure)
+            await MainActor.run { deletionFailures.append(failure) }
+            return false
         }
-        
-        return totalSize
     }
+
 }

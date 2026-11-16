@@ -113,6 +113,19 @@ class SafetyGuard {
         "/Applications",
         "~/Applications",
         
+        // Persistent application and developer data are not disposable caches.
+        "~/Library/WebKit",
+        "~/Library/HTTPStorages",
+        "~/Library/Saved Application State",
+        "~/Library/Developer/Xcode/Archives",
+        "~/Library/Developer/CoreSimulator/Devices",
+        "~/Library/pnpm",
+        "~/.gem",
+        "~/.m2/repository",
+        "~/Library/Application Support/MobileSync/Backup",
+        "~/Library/Application Support/Code/User/workspaceStorage",
+        "~/Library/Application Support/Cursor/User/workspaceStorage",
+
         // 用户关键数据
         "~/Library/Keychains",
         "~/Library/KeyboardServices",
@@ -170,8 +183,16 @@ class SafetyGuard {
         "com.tapbots.TweetbotMac"
     ]
     
+    /// Always protected, including explicit selections. Foundation may render
+    /// /private/etc as /etc, so comparisons include both lexical and resolved forms.
+    private let coreSystemDirectories = [
+        "/System", "/usr", "/bin", "/sbin", "/private/etc",
+        "/private/var/db", "/private/var/root", "/Library/Apple", "/Library/Security"
+    ]
+
     // MARK: - 应用检测缓存
     
+    private let installedAppLock = NSLock()
     private var installedAppCache: Set<String>?
     private var cacheTimestamp: Date?
     private let cacheValidityDuration: TimeInterval = 300 // 5分钟
@@ -184,6 +205,18 @@ class SafetyGuard {
     ///   - ignoreProtection: 是否忽略目录保护（用于用户明确选择的大文件清理）
     /// - Returns: true表示安全,false表示不能删除
     func isSafeToDelete(_ url: URL, ignoreProtection: Bool = false) -> Bool {
+        checkDeletion(url, ignoreProtection: ignoreProtection, verifiedInstallationResidue: false)
+    }
+
+    /// A narrow exception for a freshly verified installation residue. Callers
+    /// cannot grant this exception by passing a path or a generic override flag.
+    func isSafeToDeleteInstallationResidue(_ candidate: InstallationResidue) async -> Bool {
+        guard await InstallationResidueScanner().validateForRemoval(candidate) else { return false }
+        return checkDeletion(candidate.url, ignoreProtection: false, verifiedInstallationResidue: true)
+    }
+
+    private func checkDeletion(_ url: URL, ignoreProtection: Bool,
+                               verifiedInstallationResidue: Bool) -> Bool {
         let checkedURL = url.standardizedFileURL.resolvingSymlinksInPath()
         let path = checkedURL.path
         let home = fileManager.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
@@ -191,28 +224,32 @@ class SafetyGuard {
             return false
         }
 
-        // 1. 检查是否是受保护的目录
-        // 如果 ignoreProtection 为 true (用于大文件清理)，则放宽对 protectedDirectories 的检查
-        // 但仍然禁止删除系统核心目录
-        if isProtectedPath(path) {
-            if ignoreProtection {
-                // 定义绝对不可删除的核心系统目录
-                let coreSystemPaths = ["/System", "/usr", "/bin", "/sbin", "/private/var/db", "/private/var/root", "/Library/Apple", "/Library/Security"]
-                let isCore = coreSystemPaths.contains { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
-                
-                if isCore {
-                    print("[SafetyGuard] 🛡️ Core system path, cannot delete even with bypass: \(path)")
-                    return false
-                } else {
-                    print("[SafetyGuard] ⚠️ Bypassing directory protection for: \(path)")
-                    // 允许继续后续检查
-                }
-            } else {
-                print("[SafetyGuard] 🛡️ Protected path, cannot delete: \(path)")
-                return false
-            }
+        // Managed runtimes and rollback roots must never be removed through a
+        // generic cache/large-file ancestor, even when that ancestor is selected.
+        if !verifiedInstallationResidue && InstallationResidueScanner.excludesGenericCleanup(checkedURL) {
+            return false
         }
-        
+
+        // Recheck temporary files immediately before automatic cleanup. Never
+        // remove a temporary directory, even when it contains old files.
+        if !ignoreProtection, !verifiedInstallationResidue,
+           let root = TemporaryCleanupPolicy.temporaryRoot(containing: url),
+           !TemporaryCleanupPolicy.isEligible(url, in: root) {
+            return false
+        }
+
+        // Check core paths independently of the user-data override. Resolve both
+        // sides and retain lexical forms so aliases and nonexistent descendants
+        // cannot bypass protection when Foundation normalizes /private paths.
+        if isCoreSystemPath(url) {
+            print("[SafetyGuard] 🛡️ Core system path, cannot delete: \(path)")
+            return false
+        }
+        if isProtectedPath(path) && !ignoreProtection && !verifiedInstallationResidue {
+            print("[SafetyGuard] 🛡️ Protected path, cannot delete: \(path)")
+            return false
+        }
+
         // 2. 检查是否是系统文件
         if isSystemFile(checkedURL) {
             print("[SafetyGuard] 🛡️ System file, cannot delete: \(path)")
@@ -350,6 +387,24 @@ class SafetyGuard {
     
     // MARK: - 私有方法
     
+    private func pathVariants(_ url: URL) -> Set<String> {
+        [url.path, url.standardizedFileURL.path,
+         url.resolvingSymlinksInPath().path,
+         url.standardizedFileURL.resolvingSymlinksInPath().path]
+    }
+
+    private func isCoreSystemPath(_ url: URL) -> Bool {
+        let candidates = pathVariants(url)
+        return coreSystemDirectories.contains { directory in
+            let protectedPaths = pathVariants(URL(fileURLWithPath: directory))
+            return candidates.contains { path in
+                protectedPaths.contains { protectedPath in
+                    path == protectedPath || path.hasPrefix(protectedPath + "/") || protectedPath.hasPrefix(path + "/")
+                }
+            }
+        }
+    }
+
     private func isProtectedPath(_ path: String) -> Bool {
         let expandedPath = NSString(string: path).expandingTildeInPath
         
@@ -480,6 +535,8 @@ class SafetyGuard {
     
     /// 获取所有已安装应用的标识符 (带缓存)
     private func getInstalledApplications() -> Set<String> {
+        installedAppLock.lock()
+        defer { installedAppLock.unlock() }
         // 检查缓存是否有效
         if let cache = installedAppCache,
            let timestamp = cacheTimestamp,
@@ -567,6 +624,8 @@ class SafetyGuard {
     
     /// 使缓存失效 (当应用安装/卸载后调用)
     func invalidateCache() {
+        installedAppLock.lock()
+        defer { installedAppLock.unlock() }
         installedAppCache = nil
         cacheTimestamp = nil
     }

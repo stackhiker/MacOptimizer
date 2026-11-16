@@ -274,13 +274,17 @@ struct LargeFileDetailsSplitView: View {
                         Button(loc.text("删除", "Delete"), role: .destructive) {
                             Task {
                                 let result = await scanner.deleteItems(scanner.selectedFiles)
-                                if result.isSuccessful {
-                                    successMessage = String(format: loc.text("已删除 %d 个文件，释放了 %@", "Deleted %d files, freed %@"), result.successCount, ByteCountFormatter.string(fromByteCount: result.recoveredSize, countStyle: .file))
+                                if result.wasStopped {
+                                    successMessage = loc.text("已停止。已处理的文件在废纸篓中，其余项目已保留。", "Stopped. Processed files are in Trash; remaining items were kept.")
+                                    if !result.errors.isEmpty { successMessage += "\n" + result.errors.prefix(5).joined(separator: "\n") }
+                                    showDeleteSuccess = true
+                                } else if result.isSuccessful {
+                                    successMessage = String(format: loc.text("已将 %d 个文件移至废纸篓，文件大小 %@", "Moved %d files to Trash, file size %@"), result.successCount, ByteCountFormatter.string(fromByteCount: result.recoveredSize, countStyle: .file))
                                     showDeleteSuccess = true
                                 } else {
-                                    let failedList = result.failedFiles.prefix(5).joined(separator: "\n")
+                                    let failedList = result.errors.prefix(5).joined(separator: "\n")
                                     let moreCount = result.failedFiles.count > 5 ? "\n..." + String(format: loc.text("还有 %d 个文件失败", "and %d more files failed"), result.failedFiles.count - 5) : ""
-                                    deleteErrorMessage = String(format: loc.text("删除 %d 个文件失败:\n%s%s", "Failed to delete %d files:\n%s%s"), result.failedCount, failedList, moreCount)
+                                    deleteErrorMessage = String(format: loc.text("删除 %d 个文件失败:\n%@%@", "Failed to delete %d files:\n%@%@"), result.failedCount, failedList, moreCount)
                                     showDeleteError = true
                                 }
                             }
@@ -312,7 +316,7 @@ struct LargeFileDetailsSplitView: View {
         } message: {
             Text(deleteErrorMessage)
         }
-        .alert(loc.text("删除成功", "Deletion Successful"), isPresented: $showDeleteSuccess) {
+        .alert(loc.text("操作结果", "Operation Result"), isPresented: $showDeleteSuccess) {
             Button(loc.text("确定", "OK")) { }
         } message: {
             Text(successMessage)

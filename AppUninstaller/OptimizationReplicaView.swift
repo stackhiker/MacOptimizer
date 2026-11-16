@@ -476,12 +476,24 @@ struct OptimizationReplicaView: View {
                 Circle().stroke(Color.cyan.opacity(0.70), lineWidth: 2).frame(width: 76, height: 76)
                 Image(systemName: "checkmark").font(.system(size: 32, weight: .bold)).foregroundColor(.white)
             }
-            Text(localized("优化完成", "最佳化完成", "Optimization Complete", "最適化完了", "최적화 완료", "Оптимизация завершена"))
+            Text(service.failedTasks.isEmpty ? localized("任务处理完成", "Tasks Finished") : localized("部分任务未完成", "Some Tasks Incomplete"))
                 .font(.system(size: 24, weight: .bold))
                 .foregroundColor(.white)
             Text(localized("已完成 \(service.completedTasks.count) 项优化任务。", "已完成 \(service.completedTasks.count) 項最佳化工作。", "Completed \(service.completedTasks.count) optimization tasks.", "\(service.completedTasks.count)件の最適化タスクを完了しました。", "최적화 작업 \(service.completedTasks.count)개를 완료했습니다.", "Завершено задач оптимизации: \(service.completedTasks.count)."))
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.62))
+            if !service.taskMessages.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(service.taskMessages.keys).sorted(by: { $0.rawValue < $1.rawValue })) { task in
+                            Text(task.title(for: loc.currentLanguage) + ": " + (service.taskMessages[task] ?? ""))
+                                .font(.system(size: 12))
+                                .foregroundColor(service.failedTasks.contains(task) ? .orange : .white.opacity(0.8))
+                        }
+                    }
+                }
+                .frame(maxWidth: 480, maxHeight: 180)
+            }
             Spacer()
             Button {
                 service.showResults = false

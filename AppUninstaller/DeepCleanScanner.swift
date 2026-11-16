@@ -6,10 +6,28 @@ import Combine
 struct DeepCleanItem: Identifiable, @unchecked Sendable {
     let id = UUID()
     let url: URL
+    /// Display accounting uses the path captured by the scan, never fresh I/O.
+    let canonicalPath: String
     let name: String
     let size: Int64
     let category: DeepCleanCategory
+    let installationResidue: InstallationResidue?
     var isSelected: Bool = true
+
+    init(url: URL, name: String, size: Int64, category: DeepCleanCategory,
+         isSelected: Bool? = nil, appIcon: NSImage? = nil, bundleId: String? = nil,
+         installationResidue: InstallationResidue? = nil) {
+        self.url = url
+        self.canonicalPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+        self.name = name
+        self.size = size
+        self.category = category
+        self.installationResidue = installationResidue
+        // Personal files and inferred leftovers require an explicit selection.
+        self.isSelected = isSelected ?? (category != .largeFiles && category != .appResiduals && category != .installationResidues)
+        self.appIcon = appIcon
+        self.bundleId = bundleId
+    }
     
     // New metadata for Apps
     var appIcon: NSImage? = nil
@@ -17,6 +35,18 @@ struct DeepCleanItem: Identifiable, @unchecked Sendable {
     
     var formattedSize: String {
         ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+
+    var installationReviewReason: String? {
+        guard let installationResidue else { return nil }
+        let loc = LocalizationManager.shared
+        switch installationResidue.kind {
+        case .appBackup: return loc.text(simplifiedChinese: "旧版本应用备份；请确认不再需要回退。", traditionalChinese: "舊版本應用程式備份；請確認不再需要還原。", english: "Old app backup; confirm you no longer need it for rollback.", japanese: "旧アプリのバックアップです。復元が不要か確認してください。", korean: "이전 앱 백업입니다. 복원이 필요 없는지 확인하세요.", russian: "Старая копия приложения. Убедитесь, что откат не нужен.")
+        case .codexInstallStaging: return loc.text(simplifiedChinese: "已停用的安装暂存文件；请确认当前版本可正常使用。", traditionalChinese: "已停用的安裝暫存檔；請確認目前版本可正常使用。", english: "Inactive installation files; confirm the current version works.", japanese: "未使用のインストールファイルです。現在のバージョンの動作を確認してください。", korean: "사용하지 않는 설치 파일입니다. 현재 버전의 작동을 확인하세요.", russian: "Неактивные файлы установки. Проверьте работу текущей версии.")
+        case .sparkleDownload: return loc.text(simplifiedChinese: "旧更新下载包；再次安装时可能需要重新下载。", traditionalChinese: "舊更新下載套件；再次安裝時可能需要重新下載。", english: "Old update download; reinstalling may require another download.", japanese: "古い更新パッケージです。再インストール時に再ダウンロードが必要な場合があります。", korean: "이전 업데이트 파일입니다. 재설치 시 다시 다운로드해야 할 수 있습니다.", russian: "Старый пакет обновления. Для переустановки может потребоваться загрузка.")
+        case .verificationTemporary: return loc.text(simplifiedChinese: "安装验证留下的临时文件；请确认安装已完成。", traditionalChinese: "安裝驗證留下的暫存檔；請確認安裝已完成。", english: "Temporary installation verification files; confirm installation is complete.", japanese: "インストール確認用の一時ファイルです。インストール完了を確認してください。", korean: "설치 확인용 임시 파일입니다. 설치가 완료되었는지 확인하세요.", russian: "Временные файлы проверки установки. Убедитесь, что установка завершена.")
+        case .projectBackup: return loc.text(simplifiedChinese: "优化大师的旧构建备份；请确认不再需要回退。", traditionalChinese: "優化大師的舊建置備份；請確認不再需要還原。", english: "Old Mac Optimizer build backup; confirm rollback is no longer needed.", japanese: "Mac Optimizer の旧ビルドのバックアップです。復元が不要か確認してください。", korean: "Mac Optimizer 이전 빌드 백업입니다. 복원이 필요 없는지 확인하세요.", russian: "Старая сборка Mac Optimizer. Убедитесь, что откат не нужен.")
+        }
     }
 }
 
@@ -34,6 +64,7 @@ enum DeepCleanCategory: String, CaseIterable, Sendable {
     case systemLogs = "Log Files"
     case systemCaches = "Cache Files"
     case appResiduals = "App Residue"
+    case installationResidues = "Installation Residue"
     
     var localizedName: String {
         let loc = LocalizationManager.shared
@@ -43,6 +74,7 @@ enum DeepCleanCategory: String, CaseIterable, Sendable {
         case .systemLogs: return loc.text(simplifiedChinese: "日志文件", traditionalChinese: "日誌檔案", english: "Log Files", japanese: "ログファイル", korean: "로그 파일", russian: "Файлы журналов")
         case .systemCaches: return loc.text(simplifiedChinese: "缓存文件", traditionalChinese: "快取檔案", english: "Cache Files", japanese: "キャッシュファイル", korean: "캐시 파일", russian: "Файлы кэша")
         case .appResiduals: return loc.text(simplifiedChinese: "应用残留", traditionalChinese: "應用程式殘留", english: "App Residue", japanese: "アプリの残存ファイル", korean: "앱 잔여 파일", russian: "Остатки приложений")
+        case .installationResidues: return loc.text(simplifiedChinese: "安装残留与旧备份", traditionalChinese: "安裝殘留與舊備份", english: "Install Leftovers & Old Backups", japanese: "インストール残存と旧バックアップ", korean: "설치 잔여 파일 및 이전 백업", russian: "Остатки установки и старые копии")
         }
     }
     
@@ -53,6 +85,7 @@ enum DeepCleanCategory: String, CaseIterable, Sendable {
         case .systemLogs: return "doc.text.fill"
         case .systemCaches: return "externaldrive.fill"
         case .appResiduals: return "exclamationmark.triangle.fill"
+        case .installationResidues: return "shippingbox.fill"
         }
     }
     
@@ -63,14 +96,42 @@ enum DeepCleanCategory: String, CaseIterable, Sendable {
         case .systemLogs: return .gray
         case .systemCaches: return .blue
         case .appResiduals: return .orange
+        case .installationResidues: return .indigo
         }
     }
+}
+
+struct DeepCleanResult {
+    let count: Int
+    /// Logical size moved to Trash, not a promise of reclaimed disk blocks.
+    let size: Int64
+    let failures: [RemovalFailure]
+    let wasStopped: Bool
+    let diskSpaceChange: Int64?
+}
+
+private enum DeepCleanScanSession {
+    @TaskLocal static var id: UUID?
+}
+
+private struct DeepCleanMergeEntry: Sendable {
+    let index: Int
+    let url: URL
+    let path: String
+    let size: Int64
+    let isNew: Bool
+    let isInstallationResidue: Bool
 }
 
 // MARK: - Scanner
 
 class DeepCleanScanner: ObservableObject {
-    @Published var items: [DeepCleanItem] = []
+    @Published var items: [DeepCleanItem] = [] {
+        didSet {
+            selectedSummaryCache = nil
+            itemsRevision &+= 1
+        }
+    }
     @Published var isScanning = false
     @Published var isCleaning = false
     @Published var scanProgress: Double = 0.0
@@ -90,12 +151,27 @@ class DeepCleanScanner: ObservableObject {
     @Published var cleaningDescription: String = ""
     
     // 选中的大小
-    var selectedSize: Int64 {
-        items.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-    }
-    
-    var selectedCount: Int {
-        items.filter { $0.isSelected }.count
+    var selectedSize: Int64 { selectedSummary.size }
+    var selectedCount: Int { selectedSummary.count }
+
+    private var selectedSummaryCache: (size: Int64, count: Int)?
+    private var itemsRevision: UInt64 = 0
+    private(set) var selectedSummaryBuildCount = 0
+
+    private var selectedSummary: (size: Int64, count: Int) {
+        if let selectedSummaryCache { return selectedSummaryCache }
+        let selected = items.filter(\.isSelected)
+        let roots = Set(CleanupFileSystem.uniqueRootPaths(selected.map(\.canonicalPath)))
+        var seen = Set<String>()
+        var summary: (size: Int64, count: Int) = (0, 0)
+        for item in selected where roots.contains(item.canonicalPath) {
+            guard seen.insert(item.canonicalPath).inserted else { continue }
+            summary.size += item.size
+            summary.count += 1
+        }
+        selectedSummaryCache = summary
+        selectedSummaryBuildCount += 1
+        return summary
     }
     
     // Progress smoothing
@@ -104,7 +180,53 @@ class DeepCleanScanner: ObservableObject {
     private let progressSmoothingFactor: Double = 1000.0 // Items to reach 50% of range
     
     private let fileManager = FileManager.default
-    private var scanTask: Task<Void, Never>?
+    @MainActor private var scanTask: Task<Void, Never>?
+    @MainActor private var activeScanID: UUID?
+    @Published private(set) var isStoppingScan = false
+    @Published private(set) var scanWasStopped = false
+    @Published private(set) var lastFailures: [RemovalFailure] = []
+    @Published private(set) var lastCleanupResult: DeepCleanResult?
+    private let scanCategory: ((DeepCleanCategory) async -> [DeepCleanItem])?
+    private let trashItem: (URL) async throws -> Void
+    private let deletionAllowed: (URL, Bool) -> Bool
+    private let recordFailure: (RemovalFailure) -> Void
+    private let scanRootSelector: @Sendable ([String]) -> [String]
+    private let scanInstallationResidues: () async -> [InstallationResidue]
+    private let residueValidator: (InstallationResidue) async -> Bool
+
+    init(scanCategory: ((DeepCleanCategory) async -> [DeepCleanItem])? = nil,
+         trashItem: @escaping (URL) async throws -> Void = {
+             try DeletionLogService.shared.trashItem(at: $0, category: "DeepClean")
+         },
+         deletionAllowed: @escaping (URL, Bool) -> Bool = {
+             SafetyGuard.shared.isSafeToDelete($0, ignoreProtection: $1)
+         },
+         recordFailure: @escaping (RemovalFailure) -> Void = {
+             DeletionLogService.shared.logFailure($0, category: "DeepClean")
+         },
+         scanRootSelector: @escaping @Sendable ([String]) -> [String] = {
+             CleanupFileSystem.uniqueRootPaths($0)
+         },
+         scanInstallationResidues: (() async -> [InstallationResidue])? = nil,
+         residueValidator: @escaping (InstallationResidue) async -> Bool = {
+             await SafetyGuard.shared.isSafeToDeleteInstallationResidue($0)
+         }) {
+        self.scanCategory = scanCategory
+        self.trashItem = trashItem
+        self.deletionAllowed = deletionAllowed
+        self.recordFailure = recordFailure
+        self.scanRootSelector = scanRootSelector
+        if let scanInstallationResidues {
+            self.scanInstallationResidues = scanInstallationResidues
+        } else if scanCategory != nil {
+            self.scanInstallationResidues = { [] }
+        } else {
+            self.scanInstallationResidues = {
+                await InstallationResidueScanner().scan(shouldCancel: { Task.isCancelled })
+            }
+        }
+        self.residueValidator = residueValidator
+    }
     
     // 系统保护 - 绝对不删
     private let protectedPaths: Set<String> = [
@@ -121,80 +243,135 @@ class DeepCleanScanner: ObservableObject {
     
     // MARK: - API
     
+    @MainActor
     func startScan() async {
-        await MainActor.run {
-            self.reset()
-            self.isScanning = true
-            self.scanStatus = LocalizationManager.shared.text(
-                simplifiedChinese: "正在准备…",
-                traditionalChinese: "正在準備…",
-                english: "Preparing…",
-                japanese: "準備中…",
-                korean: "준비 중…",
-                russian: "Подготовка…"
-            )
-            self.scanProgress = 0.0
+        guard scanTask == nil, !isScanning, !isCleaning, !Task.isCancelled else { return }
+        reset()
+        let id = UUID()
+        activeScanID = id
+        isScanning = true
+        scanStatus = LocalizationManager.shared.text("正在准备…", "Preparing…")
+        let task = Task {
+            await DeepCleanScanSession.$id.withValue(id) {
+                await self.performScan(id: id)
+            }
         }
-        
-        let categoriesToScan: [DeepCleanCategory] = [.junkFiles, .systemLogs, .systemCaches, .appResiduals, .largeFiles]
-        let totalCategories = Double(categoriesToScan.count)
-        
-        for (index, category) in categoriesToScan.enumerated() {
-            // Update Current Category
+        scanTask = task
+        await withTaskCancellationHandler(operation: {
+            await task.value
+        }, onCancel: {
+            task.cancel()
+        })
+        guard activeScanID == id else { return }
+        scanWasStopped = isStoppingScan || task.isCancelled
+        scanStatus = LocalizationManager.shared.text(
+            scanWasStopped ? "扫描已停止" : "扫描完成",
+            scanWasStopped ? "Scan stopped" : "Scan complete")
+        if !scanWasStopped { scanProgress = 1 }
+        currentScanningUrl = ""
+        activeScanID = nil
+        scanTask = nil
+        isStoppingScan = false
+        isScanning = false
+    }
+
+    private func performScan(id: UUID) async {
+        let categories: [DeepCleanCategory] = [.junkFiles, .systemLogs, .systemCaches, .appResiduals, .largeFiles, .installationResidues]
+        for (index, category) in categories.enumerated() {
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                self.currentCategory = category
-                self.scanStatus = self.statusText(for: category)
-                
-                // Define range for this task
-                let start = Double(index) / totalCategories
-                let end = Double(index + 1) / totalCategories
-                self.currentTaskProgressRange = (start, end)
-                self.scannedItemsCount = 0
-                self.scanProgress = start
+                guard activeScanID == id else { return }
+                currentCategory = category
+                scanStatus = statusText(for: category)
+                currentTaskProgressRange = (Double(index) / Double(categories.count), Double(index + 1) / Double(categories.count))
+                scannedItemsCount = 0
+                scanProgress = currentTaskProgressRange.start
             }
-            
-            // Perform Scan
             let newItems: [DeepCleanItem]
-            switch category {
-            case .largeFiles: newItems = await scanLargeFiles()
-            case .junkFiles: newItems = await scanJunk()
-            case .systemLogs: newItems = await scanLogs()
-            case .systemCaches: newItems = await scanCaches()
-            case .appResiduals: newItems = await scanResiduals()
-            }
-            
-            // Update Results
-             let visibleItems = newItems.filter { ScanResultIgnoreStore.shouldInclude($0.url) }
-             await MainActor.run {
-                self.items.append(contentsOf: visibleItems)
-                self.totalSize += visibleItems.reduce(0) { $0 + $1.size }
-                self.completedCategories.insert(category)
-                self.items.sort { $0.size > $1.size } // Keep sorted
-                
-                // Animate Progress (Complete this step)
-                withAnimation(.linear(duration: 0.3)) {
-                    self.scanProgress = Double(index + 1) / totalCategories
+            if category == .installationResidues {
+                newItems = await scanInstallationResidues().map {
+                    DeepCleanItem(url: $0.url, name: $0.name, size: $0.size,
+                                  category: .installationResidues, isSelected: false, installationResidue: $0)
+                }
+            } else if let scanCategory {
+                newItems = await scanCategory(category)
+            } else {
+                switch category {
+                case .largeFiles: newItems = await scanLargeFiles()
+                case .junkFiles: newItems = await scanJunk()
+                case .systemLogs: newItems = await scanLogs()
+                case .systemCaches: newItems = await scanCaches()
+                case .appResiduals: newItems = await scanResiduals()
+                case .installationResidues: newItems = [] // Handled above.
                 }
             }
-            
-            // Small delay for visual pacing (optional, feels more "pro")
-            try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
-        }
-        
-        await MainActor.run {
-            self.isScanning = false
-            self.scanStatus = LocalizationManager.shared.text(
-                simplifiedChinese: "扫描完成",
-                traditionalChinese: "掃描完成",
-                english: "Scan Complete",
-                japanese: "スキャン完了",
-                korean: "스캔 완료",
-                russian: "Сканирование завершено"
-            )
-            self.scanProgress = 1.0
+            guard !Task.isCancelled else { return }
+            await mergeScanResults(newItems, category: category,
+                                   progress: Double(index + 1) / Double(categories.count), scanID: id)
         }
     }
-    
+
+    private func mergeScanResults(_ newItems: [DeepCleanItem], category: DeepCleanCategory,
+                                  progress: Double, scanID: UUID) async {
+        while !Task.isCancelled {
+            let current = await MainActor.run { () -> (items: [DeepCleanItem], revision: UInt64)? in
+                guard activeScanID == scanID, !isStoppingScan else { return nil }
+                return (items, itemsRevision)
+            }
+            guard let current else { return }
+            let candidates = current.items + newItems
+            let snapshot = candidates.enumerated().map {
+                DeepCleanMergeEntry(index: $0.offset, url: $0.element.url,
+                                    path: $0.element.canonicalPath, size: $0.element.size,
+                                    isNew: $0.offset >= current.items.count,
+                                    isInstallationResidue: $0.element.category == .installationResidues)
+            }
+            let selectRoots = scanRootSelector
+            let worker = Task.detached(priority: .utility) { () -> (indices: [Int], size: Int64)? in
+                guard !Task.isCancelled else { return nil }
+                let visible = snapshot.filter {
+                    ($0.isInstallationResidue || !InstallationResidueScanner.excludesGenericCleanup($0.url)) &&
+                    (!$0.isNew || ScanResultIgnoreStore.shouldInclude($0.url))
+                }
+                let roots = Set(selectRoots(visible.map(\.path)))
+                guard !Task.isCancelled else { return nil }
+                var seen = Set<String>()
+                let retained = visible.filter { roots.contains($0.path) && seen.insert($0.path).inserted }
+                    .sorted { $0.size > $1.size }
+                return (retained.map(\.index), retained.reduce(0) { $0 + $1.size })
+            }
+            let result = await withTaskCancellationHandler(operation: {
+                await worker.value
+            }, onCancel: {
+                worker.cancel()
+            })
+            guard let result, !Task.isCancelled else { return }
+            let finished = await MainActor.run {
+                guard activeScanID == scanID, !isStoppingScan, !Task.isCancelled else { return true }
+                // Preserve a selection or ignore change made while merging.
+                guard itemsRevision == current.revision else { return false }
+                items = result.indices.map { candidates[$0] }
+                totalSize = result.size
+                completedCategories.insert(category)
+                scanProgress = progress
+                return true
+            }
+            if finished { return }
+        }
+    }
+
+    /// Keep one top-level path before displaying totals or performing a cleanup.
+    static func uniqueItems(_ candidates: [DeepCleanItem]) -> [DeepCleanItem] {
+        let roots = Set(CleanupFileSystem.uniqueRoots(candidates.map { $0.url.standardizedFileURL.resolvingSymlinksInPath() }).map {
+            $0.standardizedFileURL.resolvingSymlinksInPath().path
+        })
+        var seen = Set<String>()
+        return candidates.filter {
+            let path = $0.url.standardizedFileURL.resolvingSymlinksInPath().path
+            return roots.contains(path) && seen.insert(path).inserted
+        }
+    }
+
     private func statusText(for category: DeepCleanCategory) -> String {
         let loc = LocalizationManager.shared
         switch category {
@@ -203,33 +380,32 @@ class DeepCleanScanner: ObservableObject {
         case .systemLogs: return loc.text(simplifiedChinese: "正在扫描日志…", traditionalChinese: "正在掃描日誌…", english: "Scanning Logs…", japanese: "ログをスキャン中…", korean: "로그 스캔 중…", russian: "Сканирование журналов…")
         case .systemCaches: return loc.text(simplifiedChinese: "正在扫描缓存…", traditionalChinese: "正在掃描快取…", english: "Scanning Caches…", japanese: "キャッシュをスキャン中…", korean: "캐시 스캔 중…", russian: "Сканирование кэша…")
         case .appResiduals: return loc.text(simplifiedChinese: "正在扫描应用残留…", traditionalChinese: "正在掃描應用程式殘留…", english: "Scanning App Residue…", japanese: "アプリの残存ファイルをスキャン中…", korean: "앱 잔여 파일 스캔 중…", russian: "Сканирование остатков приложений…")
+        case .installationResidues: return loc.text(simplifiedChinese: "正在检查安装残留与旧备份…", traditionalChinese: "正在檢查安裝殘留與舊備份…", english: "Checking Install Leftovers and Old Backups…", japanese: "インストール残存と旧バックアップを確認中…", korean: "설치 잔여 파일 및 이전 백업 확인 중…", russian: "Проверка остатков установки и старых копий…")
         }
     }
     
-    // Throttled UI Update Helper
-    private var lastUpdateTime: Date = Date()
-    
+    // The producer may run on a scanning worker; publish only for its live session.
+    private let progressLock = NSLock()
+    private var lastUpdateTime = Date.distantPast
+
     func updateScanningUrl(_ url: String) {
+        guard !Task.isCancelled, let id = DeepCleanScanSession.id else { return }
         let now = Date()
-        guard now.timeIntervalSince(lastUpdateTime) > 0.05 else { return } // Update every 50ms max
-        lastUpdateTime = now
-        
+        progressLock.lock()
+        let shouldPublish = now.timeIntervalSince(lastUpdateTime) >= 0.1
+        if shouldPublish { lastUpdateTime = now }
+        progressLock.unlock()
+        guard shouldPublish else { return }
         Task { @MainActor in
+            guard self.activeScanID == id, self.isScanning, !self.isStoppingScan else { return }
             self.currentScanningUrl = url
-            
-            // Asymptotic Progress Update
             self.scannedItemsCount += 1
-            let progressWithinRange = 1.0 - (1.0 / (1.0 + Double(self.scannedItemsCount) / self.progressSmoothingFactor))
+            let progress = 1.0 - (1.0 / (1.0 + Double(self.scannedItemsCount) / self.progressSmoothingFactor))
             let (start, end) = self.currentTaskProgressRange
-            let newProgress = start + (end - start) * progressWithinRange
-            
-            // Only update if greater (monotonically increasing)
-            if newProgress > self.scanProgress {
-                self.scanProgress = newProgress
-            }
+            self.scanProgress = max(self.scanProgress, start + (end - start) * progress)
         }
     }
-    
+
     func sizeFor(category: DeepCleanCategory) -> Int64 {
         return items.filter { $0.category == category && $0.isSelected }.reduce(0) { $0 + $1.size }
     }
@@ -240,145 +416,94 @@ class DeepCleanScanner: ObservableObject {
         await scanResiduals()
     }
     
+    @MainActor
     func stopScan() {
-        scanTask?.cancel()
-        isScanning = false
+        guard let scanTask else { return }
+        isStoppingScan = true
+        scanStatus = LocalizationManager.shared.text("正在停止扫描…", "Stopping scan…")
+        scanTask.cancel()
+        // Ownership remains until the worker exits. Starting another scan or a
+        // cleanup now would mix two operations against the same result list.
     }
-    
-    func cleanSelected() async -> (count: Int, size: Int64) {
-        print("[DeepClean] 🧹 开始清理...")
-        
-        await MainActor.run {
-            self.isCleaning = true
-            self.scanStatus = LocalizationManager.shared.text(
-                simplifiedChinese: "正在准备清理…",
-                traditionalChinese: "正在準備清理…",
-                english: "Preparing Cleanup…",
-                japanese: "クリーニングの準備中…",
-                korean: "정리 준비 중…",
-                russian: "Подготовка к очистке…"
-            )
-            self.cleaningProgress = 0
-            self.cleanedCategories = []
+
+    @MainActor
+    func cleanSelected() async -> DeepCleanResult {
+        guard !isScanning, scanTask == nil, !isCleaning else {
+            return DeepCleanResult(count: 0, size: 0, failures: [], wasStopped: true, diskSpaceChange: nil)
         }
-        
-        let categoriesToClean: [DeepCleanCategory] = [.junkFiles, .systemLogs, .systemCaches, .appResiduals, .largeFiles]
-        var totalDeletedCount = 0
-        var totalDeletedSize: Int64 = 0
-        var allFailures: [URL] = []
-        
-        let categoriesWithSelection = categoriesToClean.filter { cat in
-            items.contains { $0.category == cat && $0.isSelected }
+        let selected = Self.uniqueItems(items.filter(\.isSelected))
+        isCleaning = true
+        cleaningProgress = 0
+        cleanedSize = 0
+        lastFailures = []
+        cleanedCategories = []
+        let before = CleanupDiskSnapshot.capture()
+        var completed = Set<String>()
+        var failures: [RemovalFailure] = []
+        var count = 0
+        var logicalBytes: Int64 = 0
+        defer {
+            isCleaning = false
+            currentCleaningItem = ""
+            cleaningCurrentCategory = nil
         }
-        
-        print("[DeepClean] 📋 找到 \(categoriesWithSelection.count) 个需要清理的分类")
-        
-        // 如果没有选中任何项目，直接返回
-        guard !categoriesWithSelection.isEmpty else {
-            print("[DeepClean] ⚠️ 没有选中任何项目，直接返回")
-            await MainActor.run {
-                self.isCleaning = false
-            }
-            return (0, 0)
-        }
-        
-        let totalCategories = Double(categoriesWithSelection.count)
-        
-        for (index, category) in categoriesWithSelection.enumerated() {
-            print("[DeepClean] 🔄 开始清理分类: \(category.localizedName)")
-            
-             await MainActor.run {
-                self.cleaningCurrentCategory = category
-                self.currentCategory = category
-                self.scanStatus = LocalizationManager.shared.text(
-                    simplifiedChinese: "正在清理\(category.localizedName)…",
-                    traditionalChinese: "正在清理\(category.localizedName)…",
-                    english: "Cleaning \(category.localizedName)…",
-                    japanese: "\(category.localizedName)をクリーニング中…",
-                    korean: "\(category.localizedName) 정리 중…",
-                    russian: "Очистка: \(category.localizedName)…"
-                )
-                self.cleaningDescription = LocalizationManager.shared.text(
-                    simplifiedChinese: "正在清理…",
-                    traditionalChinese: "正在清理…",
-                    english: "Cleaning…",
-                    japanese: "クリーニング中…",
-                    korean: "정리 중…",
-                    russian: "Очистка…"
-                )
-            }
-            
-            let categoryItems = items.filter { $0.category == category && $0.isSelected }
-            print("[DeepClean] 📦 该分类有 \(categoryItems.count) 个项目需要清理")
-            var categoryFailures: [URL] = []
-            
-            for item in categoryItems {
-                // ⚠️ 安全修复: 使用SafetyGuard检查
-                if !SafetyGuard.shared.isSafeToDelete(item.url) {
-                    print("[DeepClean] 🛡️ SafetyGuard blocked deletion: \(item.url.path)")
-                    categoryFailures.append(item.url)
-                    allFailures.append(item.url)
-                    continue
+        for (index, item) in selected.enumerated() {
+            guard !Task.isCancelled else { break }
+            currentCleaningItem = item.name
+            cleaningCurrentCategory = item.category
+            cleaningDescription = LocalizationManager.shared.text("正在移入废纸篓…", "Moving to Trash…")
+            do {
+                guard await canRemove(item) else {
+                    throw NSError(domain: "MacOptimizer.CleanupSafety", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: LocalizationManager.shared.text(
+                                    "此项目受保护或正在使用，已保留。", "This item is protected or in use and was kept.")])
                 }
-                
-                do {
-                    try fileManager.trashItem(at: item.url, resultingItemURL: nil)
-                    totalDeletedCount += 1
-                    totalDeletedSize += item.size
-                } catch {
-                    print("Delete failed for \(item.url): \(error.localizedDescription)")
-                    categoryFailures.append(item.url)
-                    allFailures.append(item.url)
-                }
+                guard !Task.isCancelled else { break }
+                try await trashItem(item.url)
+                completed.insert(item.url.standardizedFileURL.resolvingSymlinksInPath().path)
+                count += 1
+                logicalBytes += item.size
+                cleanedSize = logicalBytes
+            } catch {
+                let failure = RemovalFailure(path: item.url, error: error)
+                failures.append(failure)
+                recordFailure(failure)
             }
-            
-            // Update items for this category immediately
-            let capturedFailures = categoryFailures
-            await MainActor.run {
-                self.items.removeAll { item in
-                    categoryItems.contains(where: { $0.id == item.id }) && !capturedFailures.contains(item.url)
-                }
-                
-                // Mark category as cleaned
-                self.cleanedCategories.insert(category)
-                
-                // Animate Progress
-                withAnimation(.linear(duration: 0.3)) {
-                    self.cleaningProgress = Double(index + 1) / totalCategories
-                }
-            }
-            
-            // Small delay for visual pacing (reduced from 300ms to 100ms)
-            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s
+            cleanedCategories.insert(item.category)
+            cleaningProgress = Double(index + 1) / Double(max(1, selected.count))
+            await Task.yield()
         }
-        
-        let finalDeletedSize = totalDeletedSize
-        let finalDeletedCount = totalDeletedCount
-        
-        print("[DeepClean] ✅ 清理完成！共清理 \(finalDeletedCount) 个文件，释放 \(ByteCountFormatter.string(fromByteCount: finalDeletedSize, countStyle: .file))")
-        
-        await MainActor.run { [finalDeletedSize] in
-            self.cleanedSize = finalDeletedSize
-            self.totalSize -= finalDeletedSize
-            self.isCleaning = false
-            self.cleaningProgress = 1.0
-            self.cleaningCurrentCategory = nil
-            self.currentCleaningItem = ""
-            self.scanStatus = LocalizationManager.shared.text(
-                simplifiedChinese: "清理完成",
-                traditionalChinese: "清理完成",
-                english: "Cleanup Complete",
-                japanese: "クリーニング完了",
-                korean: "정리 완료",
-                russian: "Очистка завершена"
-            )
-            print("[DeepClean] 📢 已将 isCleaning 设置为 false，应该触发页面切换")
+        items.removeAll { item in
+            let path = item.url.standardizedFileURL.resolvingSymlinksInPath().path
+            return completed.contains(path) || completed.contains { path.hasPrefix($0 + "/") }
         }
-        
-        return (finalDeletedCount, finalDeletedSize)
+        totalSize = Self.uniqueItems(items).reduce(0) { $0 + $1.size }
+        lastFailures = failures
+        let change = before.flatMap { previous in CleanupDiskSnapshot.capture()?.change(since: previous) }
+        let result = DeepCleanResult(count: count, size: logicalBytes, failures: failures,
+                                     wasStopped: Task.isCancelled, diskSpaceChange: change)
+        lastCleanupResult = result
+        scanStatus = LocalizationManager.shared.text(
+            failures.isEmpty ? "已移入废纸篓" : "部分项目未能移入废纸篓",
+            failures.isEmpty ? "Moved to Trash" : "Some items could not be moved to Trash")
+        return result
     }
-    
+
+    @MainActor
+    private func canRemove(_ item: DeepCleanItem) async -> Bool {
+        if item.category == .installationResidues {
+            guard let candidate = item.installationResidue,
+                  candidate.url == item.url,
+                  !Task.isCancelled else { return false }
+            return await residueValidator(candidate)
+        }
+        guard !InstallationResidueScanner.excludesGenericCleanup(item.url) else { return false }
+        return deletionAllowed(item.url, item.category == .largeFiles)
+    }
+
+    @MainActor
     func reset() {
+        guard !isScanning, scanTask == nil, !isCleaning else { stopScan(); return }
         items = []
         totalSize = 0
         cleanedSize = 0
@@ -389,8 +514,11 @@ class DeepCleanScanner: ObservableObject {
         cleaningCurrentCategory = nil
         cleanedCategories = []
         cleaningDescription = ""
+        scanWasStopped = false
+        lastFailures = []
+        lastCleanupResult = nil
     }
-    
+
     // MARK: - Helper Methods
     
     private func updateStatus(_ status: String, category: DeepCleanCategory? = nil) async {
@@ -491,8 +619,10 @@ class DeepCleanScanner: ObservableObject {
         ]
         
         for dir in appDirs {
+            if Task.isCancelled { break }
             guard let contents = try? fileManager.contentsOfDirectory(atPath: dir) else { continue }
             for item in contents {
+                if Task.isCancelled { break }
                 if item.hasSuffix(".app") {
                     let appUrl = URL(fileURLWithPath: dir).appendingPathComponent(item)
                     // Get Bundle ID
@@ -515,38 +645,20 @@ class DeepCleanScanner: ObservableObject {
         let apps = getInstalledApps()
         let home = fileManager.homeDirectoryForCurrentUser
         
-        // Optimization: Use concurrent scanning for apps
-        await withTaskGroup(of: DeepCleanItem?.self) { group in
-            for app in apps {
-                group.addTask {
-                    // Predict Cache Path: ~/Library/Caches/[BundleID]
-                    let cacheUrl = home.appendingPathComponent("Library/Caches").appendingPathComponent(app.bundleId)
-                    
-                    if self.fileManager.fileExists(atPath: cacheUrl.path) {
-                        // Update UI occasionally
-                        if Int.random(in: 0...50) == 0 { await MainActor.run { self.updateScanningUrl(cacheUrl.path) } }
-                        
-                        let size = await calculateSizeAsync(at: cacheUrl)
-                        if size > 1024 * 1024 { // > 1MB
-                             return DeepCleanItem(
-                                url: cacheUrl,
-                                name: self.localizedCacheName(for: app.name),
-                                size: size,
-                                category: .systemCaches,
-                                appIcon: app.icon,
-                                bundleId: app.bundleId
-                            )
-                        }
-                    }
-                    return nil
-                }
-            }
-            
-            for await item in group {
-                if let item = item { items.append(item) }
+        for app in apps {
+            guard !Task.isCancelled else { return items }
+            let cacheUrl = home.appendingPathComponent("Library/Caches").appendingPathComponent(app.bundleId)
+            guard fileManager.fileExists(atPath: cacheUrl.path),
+                  SafetyGuard.shared.isSafeToDelete(cacheUrl) else { continue }
+            updateScanningUrl(cacheUrl.path)
+            let size = await calculateSizeAsync(at: cacheUrl)
+            if size > 1024 * 1024 {
+                items.append(DeepCleanItem(url: cacheUrl, name: localizedCacheName(for: app.name),
+                                           size: size, category: .systemCaches,
+                                           appIcon: app.icon, bundleId: app.bundleId))
             }
         }
-        
+
         // 2. Scan Log Paths (using predicted Bundle IDs)
          // (This could be integrated here or in scanLogs, but let's stick to Caches for now as requested)
          
@@ -560,9 +672,7 @@ class DeepCleanScanner: ObservableObject {
         items.append(contentsOf: manualItems)
         
         // Deduplicate
-        return Array(Set(items.map { $0.url })).compactMap { url in
-            items.first(where: { $0.url == url })
-        }
+        return Self.uniqueItems(items)
     }
     
     private func scanManualCaches() async -> [DeepCleanItem] {
@@ -582,6 +692,8 @@ class DeepCleanScanner: ObservableObject {
             
         var items: [DeepCleanItem] = []
         for dir in validPaths {
+            if Task.isCancelled { break }
+            guard SafetyGuard.shared.isSafeToDelete(dir) else { continue }
              let size = await calculateSizeAsync(at: dir)
              if size > 1024 {
                 var displayName = dir.lastPathComponent
@@ -615,6 +727,7 @@ class DeepCleanScanner: ObservableObject {
             updateScanningUrl(appSupport.path)
             if let contents = try? fileManager.contentsOfDirectory(at: appSupport, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                 for folder in contents {
+                    if Task.isCancelled { break }
                     // Update UI occasionally
                     if Int.random(in: 0...10) == 0 { await MainActor.run { self.updateScanningUrl(folder.path) } }
                     
@@ -686,6 +799,7 @@ class DeepCleanScanner: ObservableObject {
             updateScanningUrl(containers.path)
             if let contents = try? fileManager.contentsOfDirectory(at: containers, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                 for folder in contents {
+                    if Task.isCancelled { break }
                     // Update UI occasionally
                     if Int.random(in: 0...10) == 0 { await MainActor.run { self.updateScanningUrl(folder.path) } }
                     
@@ -848,22 +962,9 @@ class DeepCleanScanner: ObservableObject {
     private func scanJunk() async -> [DeepCleanItem] {
         // Trash, Downloads (Older than X?), Xcode DerivedData
         let home = fileManager.homeDirectoryForCurrentUser
-        let trash = home.appendingPathComponent(".Trash")
-        
         var items: [DeepCleanItem] = []
-        
-        // 1. Scan Trash
-        updateScanningUrl(trash.path)
-        let trashSize = await calculateSizeAsync(at: trash)
-        if trashSize > 0 {
-            items.append(DeepCleanItem(
-                url: trash,
-                name: LocalizationManager.shared.text(simplifiedChinese: "废纸篓", traditionalChinese: "垃圾桶", english: "Trash", japanese: "ゴミ箱", korean: "휴지통", russian: "Корзина"),
-                size: trashSize,
-                category: .junkFiles
-            ))
-        }
-        
+
+        // Trash is handled by the dedicated Trash module, never as a file here.
         // 2. Xcode DerivedData
         let developer = home.appendingPathComponent("Library/Developer/Xcode/DerivedData")
         if fileManager.fileExists(atPath: developer.path) {
@@ -879,21 +980,7 @@ class DeepCleanScanner: ObservableObject {
             }
         }
         
-        // 3. iOS Device Backups
-        let iosBackups = home.appendingPathComponent("Library/Application Support/MobileSync/Backup")
-        if fileManager.fileExists(atPath: iosBackups.path) {
-            updateScanningUrl(iosBackups.path)
-            let size = await calculateSizeAsync(at: iosBackups)
-            if size > 0 {
-                items.append(DeepCleanItem(
-                    url: iosBackups,
-                    name: LocalizationManager.shared.text(simplifiedChinese: "iOS 设备备份", traditionalChinese: "iOS 裝置備份", english: "iOS Backups", japanese: "iOSデバイスのバックアップ", korean: "iOS 기기 백업", russian: "Резервные копии iOS"),
-                    size: size,
-                    category: .junkFiles
-                ))
-            }
-        }
-        
+        // Device backups are user data, not automatically selected junk.
         // 4. Mail Downloads
         let mailDownloads = home.appendingPathComponent("Library/Containers/com.apple.mail/Data/Library/Mail Downloads")
         if fileManager.fileExists(atPath: mailDownloads.path) {
@@ -904,7 +991,8 @@ class DeepCleanScanner: ObservableObject {
                     url: mailDownloads,
                     name: LocalizationManager.shared.text(simplifiedChinese: "邮件附件", traditionalChinese: "郵件附件", english: "Mail Attachments", japanese: "メール添付ファイル", korean: "메일 첨부 파일", russian: "Почтовые вложения"),
                     size: size,
-                    category: .junkFiles
+                    category: .junkFiles,
+                    isSelected: false
                 ))
             }
         }
@@ -917,6 +1005,7 @@ class DeepCleanScanner: ObservableObject {
             updateScanningUrl(cachesDir.path)
             if let cacheContents = try? fileManager.contentsOfDirectory(at: cachesDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                 for cacheFolder in cacheContents {
+                    if Task.isCancelled { break }
                     // Update UI occasionally
                     if Int.random(in: 0...5) == 0 { await MainActor.run { self.updateScanningUrl(cacheFolder.path) } }
                     
@@ -979,8 +1068,9 @@ class DeepCleanScanner: ObservableObject {
         ]
         
         for (name, relativePath) in browserCaches {
+            if Task.isCancelled { break }
             let cachePath = home.appendingPathComponent(relativePath)
-            if fileManager.fileExists(atPath: cachePath.path) {
+            if fileManager.fileExists(atPath: cachePath.path), SafetyGuard.shared.isSafeToDelete(cachePath) {
                 updateScanningUrl(cachePath.path)
                 let size = await calculateSizeAsync(at: cachePath)
                 if size > 0 {
@@ -1023,9 +1113,11 @@ class DeepCleanScanner: ObservableObject {
         ]
         
         for dir in appDirs {
+            if Task.isCancelled { break }
             guard let contents = try? fileManager.contentsOfDirectory(atPath: dir) else { continue }
             
             for item in contents {
+                if Task.isCancelled { break }
                 if item.hasSuffix(".app") {
                     // 添加应用名称 (去除后缀)
                     let name = (item as NSString).deletingPathExtension
@@ -1052,8 +1144,10 @@ class DeepCleanScanner: ObservableObject {
         // 2. 添加 Homebrew Cask 应用
         let homebrewPaths = ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"]
         for caskPath in homebrewPaths {
+            if Task.isCancelled { break }
             if let casks = try? fileManager.contentsOfDirectory(atPath: caskPath) {
                 for cask in casks {
+                    if Task.isCancelled { break }
                     params.insert(cask.lowercased())
                 }
             }
@@ -1061,6 +1155,7 @@ class DeepCleanScanner: ObservableObject {
         
         // 3. 添加正在运行的应用（最重要的安全检查）
         for app in NSWorkspace.shared.runningApplications {
+            if Task.isCancelled { break }
             if let bundleId = app.bundleIdentifier {
                 params.insert(bundleId.lowercased())
             }
@@ -1152,20 +1247,24 @@ class DeepCleanScanner: ObservableObject {
     /// 删除单个项目
     @MainActor
     func deleteSingleItem(_ item: DeepCleanItem) async -> Bool {
-        // ⚠️ BUG 修复：添加 SafetyGuard 检查
-        if !SafetyGuard.shared.isSafeToDelete(item.url) {
-            print("[DeepClean] 🛡️ SafetyGuard blocked deletion: \(item.url.path)")
-            return false
-        }
-        
+        guard !isScanning, !isCleaning, scanTask == nil else { return false }
+        isCleaning = true
+        defer { isCleaning = false }
         do {
-            // ⚠️ 安全改进：使用 trashItem 替代 removeItem，支持从废纸篓恢复
-            try fileManager.trashItem(at: item.url, resultingItemURL: nil)
-            items.removeAll { $0.id == item.id }
-            totalSize -= item.size
+            guard await canRemove(item) else {
+                throw NSError(domain: "MacOptimizer.CleanupSafety", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: LocalizationManager.shared.text(
+                                "此项目受保护或正在使用，已保留。", "This item is protected or in use and was kept.")])
+            }
+            guard !Task.isCancelled else { return false }
+            try await trashItem(item.url)
+            items.removeAll { CleanupFileSystem.contains($0.url, in: item.url) }
+            totalSize = Self.uniqueItems(items).reduce(0) { $0 + $1.size }
             return true
         } catch {
-            print("删除失败: \(item.url.path) - \(error)")
+            let failure = RemovalFailure(path: item.url, error: error)
+            lastFailures = [failure]
+            recordFailure(failure)
             return false
         }
     }

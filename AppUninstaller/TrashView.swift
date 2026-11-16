@@ -38,398 +38,275 @@ class TrashScanner: ObservableObject {
     @Published var totalSize: Int64 = 0
     @Published var hasCompletedScan = false
     @Published var needsPermission = false
-    
-    // 新增属性
-    @Published var scannedItemCount: Int = 0
+    @Published var scannedItemCount = 0
     @Published var isStopped = false
-    @Published var currentScanPath: String = ""
-    @Published var isCleaning = false 
-    @Published var cleanedCount: Int = 0
+    @Published private(set) var isStoppingScan = false
+    @Published var currentScanPath = ""
+    @Published var isCleaning = false
+    @Published var cleanedCount = 0
+    /// Logical bytes permanently deleted; observed disk change is reported separately.
     @Published var cleanedSize: Int64 = 0
-    @Published var failedDeletionCount: Int = 0
+    @Published var failedDeletionCount = 0
     @Published var cleaningWasStopped = false
-    
-    // 计算选中的大小
-    var selectedSize: Int64 {
-        items.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-    }
-    
-    var formattedSelectedSize: String {
-        ByteCountFormatter.string(fromByteCount: selectedSize, countStyle: .file)
-    }
-    
-    // 切换选中状态
-    func toggleSelection(_ item: TrashItem) {
-        if let index = items.firstIndex(where: { $0.id == item.id }) {
-            items[index].isSelected.toggle()
-            // 触发发布通知（虽然 @Published 数组内元素属性变化不一定触发，但结构体替换会触发）
-        }
-    }
-    
-    // 切换所有选中状态
-    func toggleAllSelection(_ selected: Bool) {
-        for i in 0..<items.count {
-            items[i].isSelected = selected
-        }
-    }
-    
+    @Published private(set) var deletionFailures: [RemovalFailure] = []
+    @Published private(set) var scanFailure: RemovalFailure?
+    @Published private(set) var diskSpaceChange: Int64?
+
     private let fileManager = FileManager.default
     let trashURL: URL
-    private var shouldStop = false
-    private var shouldStopCleaning = false
-    
-    var formattedTotalSize: String {
-        ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file)
-    }
-    
-    init() {
-        // 使用系统 API 获取正确的废纸篓路径
-        if let trashURLs = try? fileManager.url(for: .trashDirectory, in: .userDomainMask, appropriateFor: nil, create: false) {
-            trashURL = trashURLs
-        } else {
-            // 回退到传统路径
-            trashURL = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Trash")
-        }
-    }
-    
-    func stopScan() {
-        shouldStop = true
-        isScanning = false
-        isStopped = true
+    @MainActor private var scanTask: Task<Void, Never>?
+    @MainActor private var activeScanID: UUID?
+    @MainActor private var shouldStopCleaning = false
+    private let listItems: (URL) async throws -> [URL]
+    private let measureSize: (URL) async -> Int64
+    private let removeItem: (URL) async throws -> Void
+    private let recordFailure: (RemovalFailure) -> Void
+
+    init(trashURL: URL? = nil,
+         listItems: @escaping (URL) async throws -> [URL] = {
+             try FileManager.default.contentsOfDirectory(at: $0,
+                 includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey, .isSymbolicLinkKey])
+         },
+         measureSize: @escaping (URL) async -> Int64 = {
+             CleanupFileSystem.logicalSize(at: $0, shouldCancel: { Task.isCancelled })
+         },
+         removeItem: @escaping (URL) async throws -> Void = { try FileManager.default.removeItem(at: $0) },
+         recordFailure: @escaping (RemovalFailure) -> Void = {
+             DeletionLogService.shared.logFailure($0, category: "EmptyTrash")
+         }) {
+        let systemTrash = (try? FileManager.default.url(for: .trashDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false)) ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash")
+        let requestedRoot = (trashURL ?? systemTrash).standardizedFileURL
+        // Resolve harmless ancestor aliases such as /var, but keep the final
+        // Trash component intact so an existing symlink cannot become trusted.
+        self.trashURL = requestedRoot.deletingLastPathComponent().resolvingSymlinksInPath()
+            .appendingPathComponent(requestedRoot.lastPathComponent, isDirectory: true).standardizedFileURL
+        self.listItems = listItems
+        self.measureSize = measureSize
+        self.removeItem = removeItem
+        self.recordFailure = recordFailure
     }
 
+    var selectedSize: Int64 { uniqueItems(items.filter(\.isSelected)).reduce(0) { $0 + $1.size } }
+    var formattedSelectedSize: String { ByteCountFormatter.string(fromByteCount: selectedSize, countStyle: .file) }
+    var formattedTotalSize: String { ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file) }
+
+    @MainActor
+    func toggleSelection(_ item: TrashItem) {
+        guard !isScanning, !isCleaning else { return }
+        if let index = items.firstIndex(where: { $0.id == item.id }) { items[index].isSelected.toggle() }
+    }
+
+    @MainActor
+    func toggleAllSelection(_ selected: Bool) {
+        guard !isScanning, !isCleaning else { return }
+        for index in items.indices { items[index].isSelected = selected }
+    }
+
+    @MainActor
+    func stopScan() {
+        guard let scanTask else { return }
+        isStopped = true
+        isStoppingScan = true
+        currentScanPath = LocalizationManager.shared.text("正在停止扫描…", "Stopping scan…")
+        scanTask.cancel()
+    }
+
+    @MainActor
     func stopCleaning() {
+        guard isCleaning else { return }
         shouldStopCleaning = true
         cleaningWasStopped = true
     }
-    
+
+    @MainActor
     func scan() async {
-        await MainActor.run {
-            isScanning = true
-            isStopped = false
-            shouldStop = false
-            items = []
-            totalSize = 0
-            scannedItemCount = 0
-            hasCompletedScan = false
-            isCleaning = false
-            cleanedCount = 0
-            cleanedSize = 0
-            needsPermission = false
-        }
-        
-        var scannedItems: [TrashItem] = []
-        var total: Int64 = 0
-        
-        // 首先尝试直接访问 (需要 Full Disk Access)
-        var hasAccess = false
-        
-        // 简单模拟一下扫描过程中的路径变化，提升用户体验
-        await MainActor.run { self.currentScanPath = "正在准备…" }
-        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s pre-delay
-        
+        guard scanTask == nil, !isScanning, !isCleaning, !Task.isCancelled else { return }
+        reset()
+        isScanning = true
+        let id = UUID()
+        activeScanID = id
+        let task = Task { await self.performScan(id: id) }
+        scanTask = task
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+        guard activeScanID == id else { return }
+        isStopped = isStopped || task.isCancelled
+        activeScanID = nil
+        scanTask = nil
+        isScanning = false
+        isStoppingScan = false
+        currentScanPath = ""
+        hasCompletedScan = !isStopped && scanFailure == nil
+    }
+
+    private func performScan(id: UUID) async {
+        var scanned: [TrashItem] = []
         do {
-            let contents = try fileManager.contentsOfDirectory(at: trashURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
-            hasAccess = true
-            
-            for fileURL in contents {
-                if shouldStop { break }
-                
-                let size = calculateSize(at: fileURL)
-                let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
-                let date = resourceValues?.contentModificationDate
-                let isDir = resourceValues?.isDirectory ?? false
-                
-                let item = TrashItem(
-                    url: fileURL,
-                    name: fileURL.lastPathComponent,
-                    size: size,
-                    dateDeleted: date,
-                    isDirectory: isDir
-                )
-                scannedItems.append(item)
-                total += size
-                
-                await MainActor.run {
-                    self.scannedItemCount += 1
-                    self.currentScanPath = fileURL.path
-                }
-                
-                // 稍微延时以便用户看清扫描过程 (对于文件少的情况)
-                if contents.count < 50 {
-                   try? await Task.sleep(nanoseconds: 50_000_000) // 0.05s
-                }
+            let attributes = try fileManager.attributesOfItem(atPath: trashURL.path)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory,
+                  trashURL.resolvingSymlinksInPath().path == trashURL.path else {
+                throw NSError(domain: "MacOptimizer.TrashSafety", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: LocalizationManager.shared.text(
+                        "废纸篓路径不是受信任的文件夹，未扫描或删除其中的项目。", "The Trash path is not a trusted directory. Its contents were not scanned or removed.")])
             }
-        } catch {
-            print("Direct access failed: \(error)")
-        }
-        
-        // Access to the user's Trash is protected by macOS. Do not fall back
-        // to a blocking Finder automation request: it can leave the scan
-        // indefinitely waiting for an off-screen permission prompt. The
-        // replica instead presents the same Full Disk Access result state as
-        // CleanMyMac and lets the user grant access explicitly.
-        if !hasAccess && !shouldStop {
-            await MainActor.run {
-                needsPermission = true
-            }
-        }
-        
-        let sortedItems = scannedItems
-            .filter { ScanResultIgnoreStore.shouldInclude($0.url) }
-            .sorted { $0.size > $1.size }
-        let finalTotal = sortedItems.reduce(0) { $0 + $1.size }
-        
-        await MainActor.run {
-            self.items = sortedItems
-            self.totalSize = finalTotal
-            self.isScanning = false
-            self.scannedItemCount = sortedItems.count
-            self.hasCompletedScan = true
-        }
-    }
-    
-    // 扫描指定文件夹（用于详情查看）
-    func scanDirectory(_ url: URL) -> [TrashItem] {
-        var items: [TrashItem] = []
-        let fileManager = FileManager.default
-        
-        guard let contents = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]) else {
-            return []
-        }
-        
-        for fileURL in contents {
-            let size = calculateSize(at: fileURL)
-            let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
-            let date = resourceValues?.contentModificationDate
-            let isDir = resourceValues?.isDirectory ?? false
-            
-            items.append(TrashItem(
-                url: fileURL,
-                name: fileURL.lastPathComponent,
-                size: size,
-                dateDeleted: date,
-                isDirectory: isDir
-            ))
-        }
-        
-        return items.sorted { $0.size > $1.size }
-    }
-    
-    // 放回原处
-    func putBack(_ item: TrashItem) {
-        let script = """
-        tell application "Finder"
-            activate
-            try
-                set targetItem to (POSIX file "\(item.url.path)") as alias
-                select targetItem
-                tell application "System Events"
-                    key code 51 using {command down}
-                end tell
-            on error
-                -- ignore
-            end try
-        end tell
-        """
-        
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            scriptObject.executeAndReturnError(&error)
-        }
-        
-        // 稍后刷新
-        Task {
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            await scan()
-        }
-    }
-    
-    func openSystemPreferences() {
-        // 打开系统设置的隐私与安全性 - 完全磁盘访问权限
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-    
-    private func scanWithShell() async -> (items: [TrashItem], total: Int64) {
-        var scannedItems: [TrashItem] = []
-        var total: Int64 = 0
-        
-        // 使用 AppleScript 通过 Finder 获取废纸篓内容
-        let script = """
-        tell application "Finder"
-            set trashItems to items of trash
-            set output to ""
-            repeat with anItem in trashItems
-                try
-                    set itemPath to POSIX path of (anItem as alias)
-                    set itemName to name of anItem
-                    set itemSize to size of anItem
-                on error
-                    set itemPath to ""
-                    set itemName to ""
-                    set itemSize to 0
-                end try
-                if itemPath is not "" then
-                    set isFolder to (class of anItem is folder)
-                    set output to output & itemPath & "|||" & itemName & "|||" & itemSize & "|||" & isFolder & "\\n"
-                end if
-            end repeat
-            return output
-        end tell
-        """
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let lines = output.components(separatedBy: "\n")
-                for line in lines {
-                    if shouldStop { break }
-                    guard !line.isEmpty else { continue }
-                    
-                    let parts = line.components(separatedBy: "|||")
-                    guard parts.count >= 3 else { continue }
-                    
-                    let path = parts[0].trimmingCharacters(in: .whitespaces)
-                    let name = parts[1].trimmingCharacters(in: .whitespaces)
-                    let sizeStr = parts[2].trimmingCharacters(in: .whitespacesAndNewlines)
-                    let size = Int64(sizeStr) ?? 0
-                    let isFolder = parts.count > 3 ? (parts[3].trimmingCharacters(in: .whitespacesAndNewlines) == "true") : false
-                    
-                    let fileURL = URL(fileURLWithPath: path)
-                    
-                    // 获取修改日期
-                    let date = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-                    
-                    let item = TrashItem(
-                        url: fileURL,
-                        name: name,
-                        size: size,
-                        dateDeleted: date,
-                        isDirectory: isFolder
-                    )
-                    scannedItems.append(item)
-                    total += size
-                    
+            let contents = try await listItems(trashURL)
+            var lastPublish = Date.distantPast
+            for url in contents {
+                guard !Task.isCancelled else { return }
+                guard isDirectTrashChild(url), ScanResultIgnoreStore.shouldInclude(url) else { continue }
+                let size = await measureSize(url)
+                guard !Task.isCancelled else { return }
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey, .isSymbolicLinkKey])
+                scanned.append(TrashItem(url: url, name: url.lastPathComponent, size: size,
+                    dateDeleted: values?.contentModificationDate,
+                    isDirectory: values?.isDirectory == true && values?.isSymbolicLink != true))
+                let now = Date()
+                if now.timeIntervalSince(lastPublish) >= 0.1 {
+                    lastPublish = now
+                    let count = scanned.count
                     await MainActor.run {
-                        self.scannedItemCount += 1
-                        self.currentScanPath = path
+                        guard activeScanID == id, !isStoppingScan else { return }
+                        currentScanPath = url.path
+                        scannedItemCount = count
                     }
                 }
             }
         } catch {
-            print("AppleScript scan failed: \(error)")
-        }
-        
-        return (scannedItems, total)
-    }
-    
-    func emptyTrash() async -> Int64 {
-        let itemsToDelete = items.filter { $0.isSelected }
-        
-        await MainActor.run {
-            self.isCleaning = true
-            self.cleanedCount = 0
-            self.cleanedSize = 0
-            self.failedDeletionCount = 0
-            self.cleaningWasStopped = false
-            self.shouldStopCleaning = false
-        }
-        
-        var removedSize: Int64 = 0
-        var removedIDs = Set<UUID>()
-        var failedCount = 0
-        
-        for item in itemsToDelete {
-            if shouldStopCleaning { break }
-
-            do {
-                // 尝试解锁文件 (如果是被锁定的)
-                try? fileManager.setAttributes([.immutable: false], ofItemAtPath: item.url.path)
-                
-                try fileManager.removeItem(at: item.url)
-                removedSize += item.size
-                removedIDs.insert(item.id)
+            guard !Task.isCancelled else { return }
+            let error = error as NSError
+            // A missing Trash folder is an empty Trash, not a permissions error.
+            if !(error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError) {
+                let failure = RemovalFailure(path: trashURL, error: error)
                 await MainActor.run {
-                    self.cleanedCount += 1
-                    self.cleanedSize += item.size
+                    guard activeScanID == id, !isStoppingScan else { return }
+                    scanFailure = failure
+                    needsPermission = (error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoPermissionError)
+                        || (error.domain == NSPOSIXErrorDomain && (error.code == Int(EACCES) || error.code == Int(EPERM)))
                 }
-                // 模拟一点延迟，让用户看到清理过程
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            } catch {
-                print("Failed to delete \(item.url.path): \(error)")
-                failedCount += 1
             }
         }
-
-        let successfullyRemovedIDs = removedIDs
-        let deletionFailureCount = failedCount
-
+        guard !Task.isCancelled else { return }
+        let result = uniqueItems(scanned).sorted { $0.size > $1.size }
         await MainActor.run {
-            // A permanent deletion is only reflected in the UI after the
-            // filesystem operation actually succeeds. Failed or unprocessed
-            // items remain visible and selectable for a later retry.
-            items.removeAll { successfullyRemovedIDs.contains($0.id) }
-            totalSize = items.reduce(0) { $0 + $1.size }
-            self.failedDeletionCount = deletionFailureCount
-            self.isCleaning = false
-            DiskSpaceManager.shared.updateDiskSpace()
-            self.scannedItemCount = items.count 
+            guard activeScanID == id, !isStoppingScan else { return }
+            items = result
+            totalSize = result.reduce(0) { $0 + $1.size }
+            scannedItemCount = result.count
         }
-        
-        return removedSize
     }
-    
+
+    /// Detail browsing never follows a symlink out of the configured Trash.
+    func scanDirectory(_ url: URL) async -> [TrashItem] {
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+        guard CleanupFileSystem.contains(resolved, in: trashURL),
+              (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+              let contents = try? await listItems(url) else { return [] }
+        var result: [TrashItem] = []
+        for child in contents {
+            guard !Task.isCancelled else { return [] }
+            guard child.standardizedFileURL.deletingLastPathComponent() == url.standardizedFileURL else { continue }
+            let size = await measureSize(child)
+            let values = try? child.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey, .isSymbolicLinkKey])
+            result.append(TrashItem(url: child, name: child.lastPathComponent, size: size,
+                dateDeleted: values?.contentModificationDate,
+                isDirectory: values?.isDirectory == true && values?.isSymbolicLink != true))
+        }
+        return result.sorted { $0.size > $1.size }
+    }
+
+    func openSystemPreferences() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Permanent removal is limited to selected immediate children of the actual
+    /// Trash root. Never remove the root, follow a parent symlink, or unlock files.
+    @MainActor
+    func emptyTrash() async -> Int64 {
+        guard !isScanning, scanTask == nil, !isCleaning, !Task.isCancelled else { return 0 }
+        isCleaning = true
+        cleanedCount = 0
+        cleanedSize = 0
+        deletionFailures = []
+        failedDeletionCount = 0
+        cleaningWasStopped = false
+        shouldStopCleaning = false
+        diskSpaceChange = nil
+        let selected = uniqueItems(items.filter(\.isSelected))
+        let before = CleanupDiskSnapshot.capture(at: trashURL)
+        var removed = Set<String>()
+        defer {
+            items.removeAll { removed.contains($0.url.standardizedFileURL.path) }
+            totalSize = uniqueItems(items).reduce(0) { $0 + $1.size }
+            scannedItemCount = items.count
+            failedDeletionCount = deletionFailures.count
+            diskSpaceChange = CleanupDiskSnapshot.capture(at: trashURL)?.change(since: before)
+            isCleaning = false
+            DiskSpaceManager.shared.updateDiskSpace()
+        }
+        for item in selected {
+            if shouldStopCleaning || Task.isCancelled { cleaningWasStopped = true; break }
+            do {
+                guard isDirectTrashChild(item.url), isUnchangedTrashRoot() else {
+                    throw NSError(domain: "MacOptimizer.TrashSafety", code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: LocalizationManager.shared.text(
+                            "仅允许删除废纸篓内选中的项目，已保留此路径。", "Only selected items inside Trash can be removed. This path was kept.")])
+                }
+                try await removeItem(item.url.standardizedFileURL)
+                removed.insert(item.url.standardizedFileURL.path)
+                cleanedCount += 1
+                cleanedSize += item.size
+            } catch {
+                let failure = RemovalFailure(path: item.url, error: error)
+                deletionFailures.append(failure)
+                recordFailure(failure)
+            }
+            await Task.yield()
+        }
+        return cleanedSize
+    }
+
+    private func isDirectTrashChild(_ url: URL) -> Bool {
+        let candidate = url.standardizedFileURL
+        guard candidate.path != trashURL.path else { return false }
+        return candidate.deletingLastPathComponent().path == trashURL.path
+    }
+
+    private func isUnchangedTrashRoot() -> Bool {
+        guard trashURL.resolvingSymlinksInPath().path == trashURL.path,
+              let attributes = try? fileManager.attributesOfItem(atPath: trashURL.path) else { return false }
+        return attributes[.type] as? FileAttributeType == .typeDirectory
+    }
+
+    private func uniqueItems(_ candidates: [TrashItem]) -> [TrashItem] {
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0.url.standardizedFileURL.path).inserted }
+    }
+
+    @MainActor
     func reset() {
+        guard !isScanning, scanTask == nil, !isCleaning else {
+            stopScan()
+            stopCleaning()
+            return
+        }
         items = []
-        isScanning = false
         totalSize = 0
         needsPermission = false
         scannedItemCount = 0
         hasCompletedScan = false
         isStopped = false
+        isStoppingScan = false
         currentScanPath = ""
-        isCleaning = false
         cleanedCount = 0
         cleanedSize = 0
         failedDeletionCount = 0
         cleaningWasStopped = false
         shouldStopCleaning = false
-    }
-    
-    private func calculateSize(at url: URL) -> Int64 {
-        var totalSize: Int64 = 0
-        var isDirectory: ObjCBool = false
-        
-        if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-            if isDirectory.boolValue {
-                guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
-                for case let fileURL as URL in enumerator {
-                    do {
-                        let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey])
-                        totalSize += Int64(resourceValues.fileSize ?? 0)
-                    } catch { continue }
-                }
-            } else {
-                do {
-                    let attributes = try fileManager.attributesOfItem(atPath: url.path)
-                    totalSize = Int64(attributes[.size] as? UInt64 ?? 0)
-                } catch { return 0 }
-            }
-        }
-        return totalSize
+        deletionFailures = []
+        scanFailure = nil
+        diskSpaceChange = nil
     }
 }
 
@@ -1095,7 +972,7 @@ struct TrashView: View {
                 .bold()
                 .foregroundColor(.white)
             
-            Text(loc.text("共释放 \(ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)) 空间", "Freed \(ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)) space"))
+            Text(loc.text("已永久删除 \(ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)) 文件（逻辑大小）", "Permanently deleted \(ByteCountFormatter.string(fromByteCount: scanner.cleanedSize, countStyle: .file)) of files (logical size)"))
                 .foregroundColor(.secondaryText)
                 .padding(.top, 8)
             
@@ -1149,8 +1026,8 @@ struct TrashDirectoryView: View {
         .compatibleScrollContentBackgroundHidden()
         .background(Color.mainBackground)
         .navigationTitle(url.lastPathComponent)
-        .onAppear {
-            items = scanner.scanDirectory(url)
+        .task(id: url) {
+            items = await scanner.scanDirectory(url)
         }
     }
     

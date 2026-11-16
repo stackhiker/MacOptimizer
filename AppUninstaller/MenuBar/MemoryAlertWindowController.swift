@@ -279,7 +279,7 @@ struct MemoryAlertFloatingView: View {
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundColor(Color.black.opacity(0.85))
                                 Spacer()
-                                Text(systemMonitor.memoryUsage > 0.9 ? loc.text("快满了", "Almost Full") : loc.text("正常", "Normal"))
+                                Text(systemMonitor.memoryPressureLevel.title(loc))
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundColor(Color(hex: "FF6B6B"))
                             }
@@ -347,7 +347,7 @@ struct MemoryAlertFloatingView: View {
                         systemMonitor.terminateHighMemoryApp()
                         onClose()
                     }) {
-                        Text(loc.text("释放", "Free Up"))
+                        Text(loc.text("退出应用", "Quit App"))
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(Color.black.opacity(0.8))
                             .padding(.horizontal, 20)

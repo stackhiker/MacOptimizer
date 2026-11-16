@@ -20,7 +20,7 @@ struct CleanMyMacDetailsOverlay: View {
     }
 
     private let systemCategories: [CleanerCategory] = [
-        .systemCache, .userCache, .userLogs, .systemLogs
+        .systemCache, .userCache, .oldUpdates, .userLogs, .systemLogs
     ]
 
     @State private var selectedRoot: RootCategory

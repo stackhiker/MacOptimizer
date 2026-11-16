@@ -282,11 +282,13 @@ final class AIAssistantCoordinator: ObservableObject {
     }
 
     func confirmPendingClean() async {
+        guard !isWorking else { return }
         if !pendingAgentCleanup.isEmpty {
             pendingAgentCleanup = []
             isWorking = true
             progressText = cleaningMessage
             let result = await maintenanceAgent.confirmCleanup()
+            pendingAgentCleanup = maintenanceAgent.pendingCleanup
             messages.append(.init(
                 role: .assistant,
                 text: agentCleanupCompleteMessage(result)
@@ -305,8 +307,10 @@ final class AIAssistantCoordinator: ObservableObject {
         var cleanedCount = 0
         var cleanedBytes: Int64 = 0
         var failedCount = 0
+        var stopped = false
 
         for target in targets {
+            if Task.isCancelled { stopped = true; break }
             AppNavigationController.shared.selectedModule = target.module
             switch target {
             case .smartScan:
@@ -314,24 +318,34 @@ final class AIAssistantCoordinator: ObservableObject {
                 cleanedCount += result.success
                 cleanedBytes += result.size
                 failedCount += result.failed
+                stopped = stopped || services.smartCleanerService.cleaningWasStopped
             case .systemJunk:
                 let result = await services.junkCleaner.cleanSelectedByCategory()
                 cleanedBytes += result.cleaned
-                failedCount += result.failed > 0 ? 1 : 0
+                cleanedCount += services.junkCleaner.cleanedItemCount
+                failedCount += services.junkCleaner.deletionFailures.count
+                stopped = stopped || services.junkCleaner.stopCleaningRequested
             case .mailAttachments:
                 let result = await services.junkCleaner.cleanSelectedMailAttachments()
                 cleanedBytes += result.cleaned
-                failedCount += result.failed > 0 ? 1 : 0
+                cleanedCount += services.junkCleaner.cleanedItemCount
+                failedCount += services.junkCleaner.deletionFailures.count
+                stopped = stopped || services.junkCleaner.mailCleaningWasStopped
             case .deepClean:
                 let result = await services.deepCleanScanner.cleanSelected()
                 cleanedCount += result.count
                 cleanedBytes += result.size
+                failedCount += result.failures.count
+                stopped = stopped || result.wasStopped
             case .privacy:
                 let result = await services.privacyScanner.cleanSelected()
                 cleanedBytes += result.cleaned
                 failedCount += result.failed > 0 ? 1 : 0
             case .trash:
                 cleanedBytes += await services.trashScanner.emptyTrash()
+                cleanedCount += services.trashScanner.cleanedCount
+                failedCount += services.trashScanner.failedDeletionCount
+                stopped = stopped || services.trashScanner.cleaningWasStopped
             case .malware:
                 let result = await services.malwareScanner.removeThreats()
                 cleanedCount += result.success
@@ -339,11 +353,12 @@ final class AIAssistantCoordinator: ObservableObject {
             default:
                 break
             }
+            if stopped { break }
         }
 
         messages.append(.init(
             role: .assistant,
-            text: cleanCompleteMessage(count: cleanedCount, bytes: cleanedBytes, failed: failedCount)
+            text: (stopped ? LocalizationManager.shared.text("清理已停止。", "Cleanup stopped. ") : "") + cleanCompleteMessage(count: cleanedCount, bytes: cleanedBytes, failed: failedCount)
         ))
         progressText = ""
         isWorking = false
@@ -989,12 +1004,12 @@ final class AIAssistantCoordinator: ObservableObject {
     private func cleanCompleteMessage(count: Int, bytes: Int64, failed: Int) -> String {
         let size = formattedBytes(bytes)
         return localized([
-            .chinese: "已完成确认的清理：处理 \(count) 个项目，释放 \(size)，失败 \(failed) 个。",
-            .traditionalChinese: "已完成確認的清理：處理 \(count) 個項目，釋放 \(size)，失敗 \(failed) 個。",
-            .english: "Confirmed cleanup finished: \(count) items processed, \(size) freed, \(failed) failed.",
-            .japanese: "確認済みのクリーンアップが完了しました。処理：\(count)件、解放：\(size)、失敗：\(failed)件。",
-            .korean: "확인된 정리가 완료되었습니다. 처리 \(count)개, 확보 \(size), 실패 \(failed)개.",
-            .russian: "Подтверждённая очистка завершена: обработано \(count), освобождено \(size), ошибок: \(failed)."
+            .chinese: "已完成确认的清理：处理 \(count) 个项目，已处理文件大小 \(size)，失败 \(failed) 个。",
+            .traditionalChinese: "已完成確認的清理：處理 \(count) 個項目，已處理檔案大小 \(size)，失敗 \(failed) 個。",
+            .english: "Confirmed cleanup finished: \(count) items processed, \(size) of files handled, \(failed) failed.",
+            .japanese: "確認済みのクリーンアップが完了しました。処理：\(count)件、処理したファイル：\(size)、失敗：\(failed)件。",
+            .korean: "확인된 정리가 완료되었습니다. 처리 \(count)개, 처리한 파일 \(size), 실패 \(failed)개.",
+            .russian: "Подтверждённая очистка завершена: обработано \(count), размер обработанных файлов \(size), ошибок: \(failed)."
         ])
     }
 

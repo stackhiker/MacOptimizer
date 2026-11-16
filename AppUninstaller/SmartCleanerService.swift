@@ -139,7 +139,7 @@ enum CleanerCategory: String, CaseIterable {
     // 系统垃圾类别（新增）
     case systemJunk = "系统垃圾"
     case systemCache = "系统缓存文件"
-    case oldUpdates = "下载与更新"
+    case oldUpdates = "安装残留与旧备份"
     case userCache = "用户缓存文件"
     case trash = "废纸篓" // Add Trash case
     // languageFiles 已删除 - 删除 .lproj 会破坏应用签名
@@ -183,7 +183,7 @@ enum CleanerCategory: String, CaseIterable {
         switch self {
         case .systemJunk: return "System Junk"
         case .systemCache: return "System Cache"
-        case .oldUpdates: return "Downloads & Updates"
+        case .oldUpdates: return "Installation Residues & Old Backups"
         case .userCache: return "User Cache"
         case .trash: return "Trash"
         case .systemLogs: return "System Logs"
@@ -207,7 +207,7 @@ enum CleanerCategory: String, CaseIterable {
             switch self {
             case .systemJunk: return "系統垃圾"
             case .systemCache: return "系統快取"
-            case .oldUpdates: return "下載與更新"
+            case .oldUpdates: return "安裝殘留與舊備份"
             case .userCache: return "使用者快取"
             case .trash: return "廢紙簍"
             case .systemLogs: return "系統日誌"
@@ -227,7 +227,7 @@ enum CleanerCategory: String, CaseIterable {
             switch self {
             case .systemJunk: return "システムジャンク"
             case .systemCache: return "システムキャッシュ"
-            case .oldUpdates: return "ダウンロードとアップデート"
+            case .oldUpdates: return "インストール残留物と古いバックアップ"
             case .userCache: return "ユーザーキャッシュ"
             case .trash: return "ゴミ箱"
             case .systemLogs: return "システムログ"
@@ -245,7 +245,7 @@ enum CleanerCategory: String, CaseIterable {
             switch self {
             case .systemJunk: return "시스템 정크"
             case .systemCache: return "시스템 캐시"
-            case .oldUpdates: return "다운로드 및 업데이트"
+            case .oldUpdates: return "설치 잔여물 및 이전 백업"
             case .userCache: return "사용자 캐시"
             case .trash: return "휴지통"
             case .systemLogs: return "시스템 로그"
@@ -263,7 +263,7 @@ enum CleanerCategory: String, CaseIterable {
             switch self {
             case .systemJunk: return "Системный мусор"
             case .systemCache: return "Системный кэш"
-            case .oldUpdates: return "Загрузки и обновления"
+            case .oldUpdates: return "Остатки установки и старые резервные копии"
             case .userCache: return "Пользовательский кэш"
             case .trash: return "Корзина"
             case .systemLogs: return "Системные журналы"
@@ -315,21 +315,28 @@ enum CleanerCategory: String, CaseIterable {
 struct CleanerFileItem: Identifiable, Hashable, Sendable {
     let id = UUID()
     let url: URL
+    /// Scan-time identity for display accounting. Never resolve paths while
+    /// SwiftUI is rendering; deletion still resolves and checks the live URL.
+    let canonicalPath: String
     let name: String
     let size: Int64
     var isSelected: Bool = true  // 默认全选
     let groupId: String  // 用于分组显示
     let isDirectory: Bool
+    let installationResidue: InstallationResidue?
     
     // 用于树形展示的自引用
     var children: [CleanerFileItem]? = nil
     
-    init(url: URL, name: String, size: Int64, groupId: String, isDirectory: Bool? = nil, isSelected: Bool = true) {
+    init(url: URL, name: String, size: Int64, groupId: String, isDirectory: Bool? = nil, isSelected: Bool = true, installationResidue: InstallationResidue? = nil) {
         self.url = url
+        self.canonicalPath = url.standardizedFileURL.resolvingSymlinksInPath().path
         self.name = name
         self.size = size
         self.groupId = groupId
-        self.isSelected = isSelected
+        self.installationResidue = installationResidue
+        // A discovered installation residue always requires manual selection.
+        self.isSelected = installationResidue == nil ? isSelected : false
         if let isDir = isDirectory {
             self.isDirectory = isDir
         } else {
@@ -379,7 +386,10 @@ class AppCacheGroup: Identifiable, ObservableObject {
     let appName: String
     let bundleId: String?
     let icon: NSImage
-    @Published var files: [CleanerFileItem]
+    @Published var files: [CleanerFileItem] {
+        didSet { filesDidChange?() }
+    }
+    fileprivate var filesDidChange: (() -> Void)?
     @Published var isExpanded: Bool = false
     
     init(appName: String, bundleId: String?, icon: NSImage, files: [CleanerFileItem]) {
@@ -402,22 +412,40 @@ private enum SmartScanSession {
     @TaskLocal static var id: UUID?
 }
 
+/// Value-only input for background reconciliation; no observable group or
+/// service is read by the worker.
+private struct SmartJunkFileSnapshot: Sendable {
+    let id: UUID
+    let path: String
+}
+
 // MARK: - 智能清理服务
 class SmartCleanerService: ObservableObject {
 
     private let cleanupFile: (URL, Bool) async -> Bool
     private let deletionAllowed: (URL, Bool) -> Bool
+    private let junkRootSelector: @Sendable ([String]) -> [String]
+    private let installationResidueScan: (() async -> [InstallationResidue])?
+    private let installationResidueValidator: (InstallationResidue) async -> Bool
 
     init(cleanupFile: @escaping (URL, Bool) async -> Bool = { url, permanent in
-        if permanent {
-            do { try FileManager.default.removeItem(at: url); return true } catch { return false }
-        }
+        // Generic cleanup always moves to Trash. Emptying Trash belongs to its
+        // dedicated flow, where the user explicitly confirms permanent removal.
+        guard !permanent else { return false }
         return DeletionLogService.shared.logAndDelete(at: url, category: "SmartClean")
     }, deletionAllowed: @escaping (URL, Bool) -> Bool = {
         SafetyGuard.shared.isSafeToDelete($0, ignoreProtection: $1)
+    }, junkRootSelector: @escaping @Sendable ([String]) -> [String] = {
+        CleanupFileSystem.uniqueRootPaths($0)
+    }, installationResidueScan: (() async -> [InstallationResidue])? = nil,
+       installationResidueValidator: @escaping (InstallationResidue) async -> Bool = {
+        await SafetyGuard.shared.isSafeToDeleteInstallationResidue($0)
     }) {
         self.cleanupFile = cleanupFile
         self.deletionAllowed = deletionAllowed
+        self.junkRootSelector = junkRootSelector
+        self.installationResidueScan = installationResidueScan
+        self.installationResidueValidator = installationResidueValidator
     }
     
     // MARK: - 选中状态枚举
@@ -428,7 +456,19 @@ class SmartCleanerService: ObservableObject {
     }
     
     // 按应用分组的缓存结果 (针对 userCache)
-    @Published var appCacheGroups: [AppCacheGroup] = []
+    @Published var appCacheGroups: [AppCacheGroup] = [] {
+        didSet {
+            for group in oldValue { group.filesDidChange = nil }
+            for group in appCacheGroups {
+                group.filesDidChange = { [weak self] in
+                    guard let self else { return }
+                    self.junkResultsDidChange()
+                    if self.junkUpdateDepth == 0 { self.objectWillChange.send() }
+                }
+            }
+            junkResultsDidChange()
+        }
+    }
     
     // 原有属性
     @Published var duplicateGroups: [DuplicateGroup] = []
@@ -437,13 +477,13 @@ class SmartCleanerService: ObservableObject {
     @Published var largeFiles: [CleanerFileItem] = []
     
     // 新增系统垃圾属性
-    @Published var systemCacheFiles: [CleanerFileItem] = []
-    @Published var oldUpdateFiles: [CleanerFileItem] = []
-    @Published var userCacheFiles: [CleanerFileItem] = []
+    @Published var systemCacheFiles: [CleanerFileItem] = [] { didSet { junkResultsDidChange() } }
+    @Published var oldUpdateFiles: [CleanerFileItem] = [] { didSet { junkResultsDidChange() } }
+    @Published var userCacheFiles: [CleanerFileItem] = [] { didSet { junkResultsDidChange() } }
     @Published var trashFiles: [CleanerFileItem] = [] // New property
     // languageFiles 已删除 - 会破坏应用签名
-    @Published var systemLogFiles: [CleanerFileItem] = []
-    @Published var userLogFiles: [CleanerFileItem] = []
+    @Published var systemLogFiles: [CleanerFileItem] = [] { didSet { junkResultsDidChange() } }
+    @Published var userLogFiles: [CleanerFileItem] = [] { didSet { junkResultsDidChange() } }
     // brokenLoginItems 已删除 - 不符合"只清理缓存"原则
     
     // 扫描状态追踪 (针对 8 大分类)
@@ -456,7 +496,11 @@ class SmartCleanerService: ObservableObject {
     @Published var hasAppUpdates: Bool = false
     
     // 统计数据 (用于结果页)
+    /// Logical bytes processed, not physical disk space reclaimed.
     @Published var totalCleanedSize: Int64 = 0
+    @Published var totalMovedToTrashSize: Int64 = 0
+    @Published var observedDiskSpaceChange: Int64?
+    @Published private(set) var lastFailedCleanupFiles: [CleanerFileItem] = []
     @Published var totalResolvedThreats: Int = 0
     @Published var totalOptimizedItems: Int = 0
     
@@ -580,19 +624,120 @@ class SmartCleanerService: ObservableObject {
         }
     }
 
-    // MARK: - 系统垃圾总大小
-    var systemJunkTotalSize: Int64 {
-        let systemCache = systemCacheFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let oldUpdates = oldUpdateFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let userCache = userCacheFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let trash = trashFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let groupedCache = appCacheGroups.reduce(0) { $0 + $1.selectedSize }
-        let sysLogs = systemLogFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let userLogs = userLogFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        
-        return systemCache + oldUpdates + userCache + trash + groupedCache + sysLogs + userLogs
+    // MARK: - Cached display statistics
+    private var cachedJunkSizes: [CleanerCategory: Int64] = [:]
+    private var cachedJunkCounts: [CleanerCategory: Int] = [:]
+    private var junkUpdateDepth = 0
+    private var junkSummaryNeedsRefresh = false
+    private var junkResultRevision: UInt64 = 0
+    private(set) var junkSummaryBuildCount = 0
+
+    /// These getters are used many times per SwiftUI layout. They must remain
+    /// constant-time and must never normalize, resolve, or deduplicate paths.
+    var systemJunkTotalSize: Int64 { cachedJunkSizes[.systemJunk, default: 0] }
+    var hasJunkResults: Bool { cachedJunkCounts[.systemJunk, default: 0] > 0 }
+
+    private func junkResultsDidChange() {
+        junkResultRevision &+= 1
+        junkSummaryNeedsRefresh = true
+        if junkUpdateDepth == 0 { rebuildJunkSummary() }
+    }
+
+    private func beginJunkUpdates() { junkUpdateDepth += 1 }
+
+    private func endJunkUpdates() {
+        junkUpdateDepth -= 1
+        if junkUpdateDepth == 0 && junkSummaryNeedsRefresh {
+            rebuildJunkSummary()
+            objectWillChange.send()
+        }
+    }
+
+    private func rebuildJunkSummary() {
+        let userFiles = userCacheFiles + appCacheGroups.flatMap(\.files)
+        let categories: [(CleanerCategory, [CleanerFileItem])] = [
+            (.systemCache, systemCacheFiles), (.oldUpdates, oldUpdateFiles),
+            (.userCache, userFiles), (.systemLogs, systemLogFiles), (.userLogs, userLogFiles)
+        ]
+        var sizes: [CleanerCategory: Int64] = [:]
+        var counts: [CleanerCategory: Int] = [:]
+        for (category, files) in categories {
+            sizes[category] = Self.selectedJunkSize(files)
+            counts[category] = files.count
+        }
+        // Cross-category parents and duplicates are counted only once.
+        sizes[.systemJunk] = Self.selectedJunkSize(categories.flatMap { $0.1 })
+        counts[.systemJunk] = categories.reduce(0) { $0 + $1.1.count }
+        cachedJunkSizes = sizes
+        cachedJunkCounts = counts
+        junkSummaryNeedsRefresh = false
+        junkSummaryBuildCount += 1
+    }
+
+    private static func selectedJunkSize(_ files: [CleanerFileItem]) -> Int64 {
+        let roots = Set(CleanupFileSystem.uniqueRootPaths(Array(files.lazy.filter(\.isSelected).map(\.canonicalPath))))
+        var seen = Set<String>()
+        var size: Int64 = 0
+        for file in files where file.isSelected && roots.contains(file.canonicalPath) {
+            guard seen.insert(file.canonicalPath).inserted else { continue }
+            let bytes = max(0, file.size)
+            size = size > Int64.max - bytes ? Int64.max : size + bytes
+        }
+        return size
     }
     
+    private var allJunkFiles: [CleanerFileItem] {
+        systemCacheFiles + oldUpdateFiles + userCacheFiles + systemLogFiles + userLogFiles + appCacheGroups.flatMap(\.files)
+    }
+
+    static func uniqueFiles(_ files: [CleanerFileItem]) -> [CleanerFileItem] {
+        // Cleanup requires fresh canonical paths, unlike display accounting.
+        let paths = files.map { $0.url.standardizedFileURL.resolvingSymlinksInPath().path }
+        let rootPaths = Set(CleanupFileSystem.uniqueRootPaths(paths))
+        var seen = Set<String>()
+        return zip(files, paths).compactMap { file, path in
+            rootPaths.contains(path) && seen.insert(path).inserted ? file : nil
+        }
+    }
+
+    private static func uniqueFilesForCleanup(_ files: [CleanerFileItem]) async -> [CleanerFileItem] {
+        await Task.detached(priority: .utility) { uniqueFiles(files) }.value
+    }
+
+    @MainActor
+    func deduplicateJunkResults() async {
+        let revision = junkResultRevision
+        let session = activeScanID
+        let snapshot = allJunkFiles.filter {
+            $0.installationResidue != nil || !InstallationResidueScanner.excludesGenericCleanup($0.url)
+        }.map { SmartJunkFileSnapshot(id: $0.id, path: $0.canonicalPath) }
+        let selectRoots = junkRootSelector
+        let retainedIDs = await Task.detached(priority: .utility) {
+            let roots = Set(selectRoots(snapshot.map(\.path)))
+            var seen = Set<String>()
+            return Set(snapshot.compactMap { file in
+                roots.contains(file.path) && seen.insert(file.path).inserted ? file.id : nil
+            })
+        }.value
+        // A stopped scan or a new selection/result publication must not be
+        // overwritten by an older worker's answer.
+        guard !shouldStopScanning && !Task.isCancelled,
+              activeScanID == session, junkResultRevision == revision else { return }
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
+        var seen = Set<UUID>()
+        let keep: (CleanerFileItem) -> Bool = {
+            retainedIDs.contains($0.id) && seen.insert($0.id).inserted
+        }
+        systemCacheFiles = systemCacheFiles.filter(keep)
+        oldUpdateFiles = oldUpdateFiles.filter(keep)
+        userCacheFiles = userCacheFiles.filter(keep)
+        systemLogFiles = systemLogFiles.filter(keep)
+        userLogFiles = userLogFiles.filter(keep)
+        for group in appCacheGroups { group.files = group.files.filter(keep) }
+        appCacheGroups.removeAll { $0.files.isEmpty }
+    }
+
     var virusTotalSize: Int64 {
         virusThreats.reduce(0) { $0 + $1.size }
     }
@@ -603,19 +748,17 @@ class SmartCleanerService: ObservableObject {
         case .systemJunk:
             return systemJunkTotalSize
         case .systemCache:
-            return systemCacheFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
+            return cachedJunkSizes[.systemCache, default: 0]
         case .oldUpdates:
-            return oldUpdateFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
+            return cachedJunkSizes[.oldUpdates, default: 0]
         case .userCache:
-            let looseFilesSize = userCacheFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-            let groupedFilesSize = appCacheGroups.reduce(0) { $0 + $1.selectedSize } // Use selectedSize property
-            return looseFilesSize + groupedFilesSize
+            return cachedJunkSizes[.userCache, default: 0]
         case .trash:
             return trashFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
         case .systemLogs:
-            return systemLogFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
+            return cachedJunkSizes[.systemLogs, default: 0]
         case .userLogs:
-            return userLogFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
+            return cachedJunkSizes[.userLogs, default: 0]
         case .duplicates:
             return duplicateGroups.reduce(0) { $0 + $1.wastedSize }
         case .similarPhotos:
@@ -639,18 +782,13 @@ class SmartCleanerService: ObservableObject {
     func countFor(category: CleanerCategory) -> Int {
         switch category {
         case .systemJunk:
-             // Need to update total count logic as well to include app groups if they are part of system junk aggregation
-             // But simpler to just sum up the counts of sub-categories if possible, 
-             // or manually add appCacheGroups.files.count
-            return systemCacheFiles.count + oldUpdateFiles.count + userCacheFiles.count +
-                   appCacheGroups.reduce(0) { $0 + $1.files.count } +
-                   systemLogFiles.count + userLogFiles.count
+            return cachedJunkCounts[.systemJunk, default: 0]
         case .systemCache:
             return systemCacheFiles.count
         case .oldUpdates:
             return oldUpdateFiles.count
         case .userCache:
-            return userCacheFiles.count + appCacheGroups.reduce(0) { $0 + $1.files.count }
+            return cachedJunkCounts[.userCache, default: 0]
         case .trash:
             return trashFiles.count
         case .systemLogs:
@@ -679,6 +817,8 @@ class SmartCleanerService: ObservableObject {
     // MARK: - 切换文件选择状态
     @MainActor
     func toggleFileSelection(file: CleanerFileItem, in category: CleanerCategory) {
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
         switch category {
         case .systemCache:
             if let idx = systemCacheFiles.firstIndex(where: { $0.url == file.url }) {
@@ -760,23 +900,27 @@ class SmartCleanerService: ObservableObject {
     /// 删除单个文件
     @MainActor
     func deleteSingleFile(_ file: CleanerFileItem, from category: CleanerCategory) async -> Bool {
-        do {
-            // 使用 FileManager 删除文件
-            try fileManager.removeItem(at: file.url)
-            
-            // 从对应的数组中移除该文件
-            removeFileFromCategory(file, category: category)
-            
-            return true
-        } catch {
-            print("删除文件失败: \(file.url.path) - \(error)")
-            return false
+        guard !isCleaning && !isScanning else { return false }
+        isCleaning = true
+        cleaningWasStopped = false
+        setCleaningCancelled(false)
+        let before = CleanupDiskSnapshot.capture()
+        defer {
+            isCleaning = false
+            observedDiskSpaceChange = CleanupDiskSnapshot.capture()?.change(since: before)
         }
+        guard await deleteCleanupFile(file, bypassProtection: category == .largeFiles) else { return false }
+        removeCleanedFiles([file.url.standardizedFileURL.resolvingSymlinksInPath().path])
+        totalMovedToTrashSize += file.size
+        totalCleanedSize += file.size
+        return true
     }
-    
+
     /// 从分类数组中移除文件
     @MainActor
     private func removeFileFromCategory(_ file: CleanerFileItem, category: CleanerCategory) {
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
         switch category {
         case .systemCache:
             systemCacheFiles.removeAll { $0.url == file.url }
@@ -919,6 +1063,8 @@ class SmartCleanerService: ObservableObject {
     /// 切换主分类选中状态
     @MainActor
     func toggleMainCategorySelection(_ mainCategory: MainCategory) {
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
         let currentState = getSelectionState(for: mainCategory)
         // 如果当前是全部选中，则取消全选；否则（部分选中或未选中）全选
         let newSelected = (currentState != .all)
@@ -934,6 +1080,8 @@ class SmartCleanerService: ObservableObject {
     /// 切换应用分组的选中状态（同步更新 userCacheFiles）
     @MainActor
     func toggleAppGroupSelection(_ group: AppCacheGroup) {
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
         // 计算新状态：只要不是全选，就设为全选（如果是部分选中，操作是补全选中）
         // 或者：只要是全选，就取消；否则全选。
         // Finder逻辑：点击Checkbox时，如果是混合状态，通常变为全选或全不选。
@@ -946,18 +1094,16 @@ class SmartCleanerService: ObservableObject {
         let targetState = !allSelected
         
         // 1. 更新 Group 内的文件状态 (引用类型直接更新)
-        for i in group.files.indices {
-            group.files[i].isSelected = targetState
-        }
+        group.files = Self.settingSelection(group.files, to: targetState)
         
         // 2. 同步更新 userCacheFiles (打平的列表)
         // 建立 Group 文件 URL 集合以加速查找
         let groupURLs = Set(group.files.map { $0.url })
-        for i in userCacheFiles.indices {
-            if groupURLs.contains(userCacheFiles[i].url) {
-                userCacheFiles[i].isSelected = targetState
-            }
+        var updated = userCacheFiles
+        for i in updated.indices where groupURLs.contains(updated[i].url) {
+            updated[i].isSelected = targetState
         }
+        userCacheFiles = updated
         
         objectWillChange.send()
     }
@@ -965,6 +1111,8 @@ class SmartCleanerService: ObservableObject {
     /// 切换整个子分类的选中状态
     @MainActor
     func toggleCategorySelection(_ category: CleanerCategory, forceTo: Bool? = nil) {
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
         let files = filesFor(category: category)
         // 如果提供了强制状态则使用之，否则反转当前全选状态
         let targetState: Bool
@@ -982,35 +1130,23 @@ class SmartCleanerService: ObservableObject {
         // 全选或全不选
         switch category {
         case .systemCache:
-            for i in systemCacheFiles.indices {
-                systemCacheFiles[i].isSelected = targetState
-            }
+            systemCacheFiles = Self.settingSelection(systemCacheFiles, to: targetState)
         case .oldUpdates:
-            for i in oldUpdateFiles.indices {
-                oldUpdateFiles[i].isSelected = targetState
-            }
+            oldUpdateFiles = Self.settingSelection(oldUpdateFiles, to: targetState)
         case .userCache:
-            for i in userCacheFiles.indices {
-                userCacheFiles[i].isSelected = targetState
-            }
+            userCacheFiles = Self.settingSelection(userCacheFiles, to: targetState)
             // 同时更新分组
             for gIdx in appCacheGroups.indices {
-                for fIdx in appCacheGroups[gIdx].files.indices {
-                    appCacheGroups[gIdx].files[fIdx].isSelected = targetState
-                }
+                appCacheGroups[gIdx].files = Self.settingSelection(appCacheGroups[gIdx].files, to: targetState)
             }
         case .trash:
             for i in trashFiles.indices {
                 trashFiles[i].isSelected = targetState
             }
         case .systemLogs:
-            for i in systemLogFiles.indices {
-                systemLogFiles[i].isSelected = targetState
-            }
+            systemLogFiles = Self.settingSelection(systemLogFiles, to: targetState)
         case .userLogs:
-            for i in userLogFiles.indices {
-                userLogFiles[i].isSelected = targetState
-            }
+            userLogFiles = Self.settingSelection(userLogFiles, to: targetState)
         case .largeFiles:
             for i in largeFiles.indices {
                 largeFiles[i].isSelected = targetState
@@ -1038,6 +1174,12 @@ class SmartCleanerService: ObservableObject {
         // 手动触发ObservableObject更新，因为修改数组元素的属性不会自动触发
         objectWillChange.send()
     }
+
+    private static func settingSelection(_ files: [CleanerFileItem], to selected: Bool) -> [CleanerFileItem] {
+        var updated = files
+        for index in updated.indices { updated[index].isSelected = selected }
+        return updated
+    }
     
     /// 检查子分类是否全选
     @MainActor
@@ -1060,6 +1202,8 @@ class SmartCleanerService: ObservableObject {
 
     private func performScanSystemJunk() async {
         await MainActor.run {
+            beginJunkUpdates()
+            defer { endJunkUpdates() }
             isScanning = true
             // Remove unconditional reset to 0
             if progressRange == (0.0, 1.0) {
@@ -1072,6 +1216,7 @@ class SmartCleanerService: ObservableObject {
             trashFiles = []
             systemLogFiles = []
             userLogFiles = []
+            appCacheGroups = []
         }
         
         let totalSteps = 7.0
@@ -1083,11 +1228,12 @@ class SmartCleanerService: ObservableObject {
         await MainActor.run { systemCacheFiles = visible(sysCache) }
         currentStep += 1
         
-        // 2. 扫描旧更新 (Skipped due to SIP protection issues)
-        // await updateProgress(step: currentStep, total: totalSteps, message: "正在扫描旧更新...")
-        // let oldUpd = await scanOldUpdates()
-        // await MainActor.run { oldUpdateFiles = oldUpd }
-        // currentStep += 1
+        // Only recognized installation leftovers; never broad system updates
+        // or ordinary Downloads. All candidates remain unselected for review.
+        await updateProgress(step: currentStep, total: totalSteps, message: "正在检查安装残留与旧备份...")
+        let residues = await scanInstallationResidues()
+        await MainActor.run { oldUpdateFiles = visible(residues) }
+        currentStep += 1
         
         // 3. 扫描用户缓存
         await updateProgress(step: currentStep, total: totalSteps, message: "正在扫描用户缓存...")
@@ -1095,11 +1241,8 @@ class SmartCleanerService: ObservableObject {
         await MainActor.run { userCacheFiles = visible(usrCache) }
         currentStep += 1
         
-        // 3.5 扫描废纸篓
-        await updateProgress(step: currentStep, total: totalSteps, message: "正在扫描废纸篓...")
-        let trash = await scanTrash()
-        await MainActor.run { trashFiles = visible(trash) }
-        
+        // Trash is handled only by the dedicated module and confirmation.
+
         // 4. 扫描语言文件 - ⚠️ 已禁用(用户要求只清理缓存和日志)
         // await updateProgress(step: currentStep, total: totalSteps, message: "正在扫描语言文件...")
         // let langFiles = await scanLanguageFiles()
@@ -1123,9 +1266,8 @@ class SmartCleanerService: ObservableObject {
         // let brokenItems = await scanBrokenLoginItems()
         // await MainActor.run { brokenLoginItems = brokenItems }
         
-        await MainActor.run {
-            currentScanPath = ""
-        }
+        await deduplicateJunkResults()
+        await MainActor.run { currentScanPath = "" }
     }
     
     private func updateProgress(step: Double, total: Double, message: String) async {
@@ -1136,7 +1278,10 @@ class SmartCleanerService: ObservableObject {
     }
 
     private nonisolated func visible(_ items: [CleanerFileItem]) -> [CleanerFileItem] {
-        items.filter { ScanResultIgnoreStore.shouldInclude($0.url) }
+        items.filter {
+            ScanResultIgnoreStore.shouldInclude($0.url) &&
+            ($0.installationResidue != nil || !InstallationResidueScanner.excludesGenericCleanup($0.url))
+        }
     }
     
     // MARK: - 系统缓存扫描 (全面扫描系统级缓存)
@@ -1174,22 +1319,18 @@ class SmartCleanerService: ObservableObject {
         // 2. 扫描开发者缓存（通常非常大）
         let developerCaches = [
             home.appendingPathComponent("Library/Developer/Xcode/DerivedData"),
-            home.appendingPathComponent("Library/Developer/Xcode/Archives"),
             home.appendingPathComponent("Library/Developer/Xcode/iOS DeviceSupport"),
             home.appendingPathComponent("Library/Developer/Xcode/watchOS DeviceSupport"),
             home.appendingPathComponent("Library/Developer/Xcode/tvOS DeviceSupport"),
             home.appendingPathComponent("Library/Developer/CoreSimulator/Caches"),
-            home.appendingPathComponent("Library/Developer/CoreSimulator/Devices"),
             home.appendingPathComponent("Library/Caches/com.apple.dt.Xcode"),
             // CocoaPods
             home.appendingPathComponent("Library/Caches/CocoaPods"),
             // npm/yarn/pnpm
             home.appendingPathComponent(".npm/_cacache"),
             home.appendingPathComponent("Library/Caches/Yarn"),
-            home.appendingPathComponent("Library/pnpm"),
             // Gradle/Maven
             home.appendingPathComponent(".gradle/caches"),
-            home.appendingPathComponent(".m2/repository"),
             // Homebrew
             home.appendingPathComponent("Library/Caches/Homebrew"),
             // pip
@@ -1292,84 +1433,21 @@ class SmartCleanerService: ObservableObject {
             }
         }
         
-        // 4. 扫描私有临时文件夹 /private/var/folders
-        // 这是系统及应用存放临时文件和缓存的主要位置
-        if let _ = try? fileManager.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false) {
-             let tempDir = NSTemporaryDirectory()
-             let userTempRoot = URL(fileURLWithPath: tempDir).deletingLastPathComponent()
-             
-             let cacheDir = userTempRoot.appendingPathComponent("C")
-             let tempDirUrl = userTempRoot.appendingPathComponent("T")
-             
-             let targetDirs = [cacheDir, tempDirUrl]
-             
-             for targetDir in targetDirs {
-                 if fileManager.fileExists(atPath: targetDir.path) {
-                     if let contents = try? fileManager.contentsOfDirectory(at: targetDir, includingPropertiesForKeys: nil) {
-                         for itemURL in contents {
-                             if itemURL.lastPathComponent == "com.apple.nsurlsessiond" { continue }
-                             
-                             let size = calculateSize(at: itemURL)
-                             if size > 100 * 1024 { // 降低阈值到 100KB
-                                 let name = itemURL.lastPathComponent.replacingOccurrences(of: "com.apple.", with: "Apple ")
-                                 items.append(CleanerFileItem(
-                                     url: itemURL,
-                                     name: "系统临时文件: \(name)",
-                                     size: size,
-                                     groupId: "systemCache"
-                                 ))
-                             }
-                         }
-                     }
-                 }
-             }
+        // Only old regular files directly inside temporary roots are eligible.
+        // Do not move session/build/download directories, regardless of their size.
+        for root in TemporaryCleanupPolicy.roots {
+            for url in TemporaryCleanupPolicy.eligibleFiles(in: root, shouldCancel: { self.shouldStopScanning || Task.isCancelled }) {
+                let size = calculateSize(at: url)
+                if size > 0 {
+                    items.append(CleanerFileItem(url: url, name: "临时文件: " + url.lastPathComponent,
+                                                 size: size, groupId: "systemCache"))
+                }
+            }
         }
 
-        // 5. 额外扫描 /private/var/tmp 和 /tmp
-        let sharedTempPaths = ["/private/var/tmp", "/tmp"]
-        for path in sharedTempPaths {
-            let url = URL(fileURLWithPath: path)
-            if let contents = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) {
-                for itemURL in contents {
-                    let size = calculateSize(at: itemURL)
-                    if size > 512 * 1024 { // 512KB
-                        items.append(CleanerFileItem(
-                            url: itemURL,
-                            name: "临时文件: \(itemURL.lastPathComponent)",
-                            size: size,
-                            groupId: "systemCache"
-                        ))
-                    }
-                }
-            }
-        }
-        
-        // 4. 扫描浏览器数据 (仅安全的缓存目录)
-        // 注意: 已移除 IndexedDB, LocalStorage, Databases - 这些包含用户登录信息
-        let browserDataPaths = [
-            // Chrome - 仅 Service Worker 和 ShaderCache (安全)
-            home.appendingPathComponent("Library/Application Support/Google/Chrome/Default/Service Worker"),
-            home.appendingPathComponent("Library/Application Support/Google/Chrome/ShaderCache"),
-            // Edge - 仅 Service Worker (安全)
-            home.appendingPathComponent("Library/Application Support/Microsoft Edge/Default/Service Worker")
-            // Safari - 已移除 Databases 和 LocalStorage (包含登录信息)
-        ]
-        
-        for browserPath in browserDataPaths {
-            if fileManager.fileExists(atPath: browserPath.path) {
-                let size = calculateSize(at: browserPath)
-                if size > 100 * 1024 {
-                    let parentName = browserPath.deletingLastPathComponent().lastPathComponent
-                    items.append(CleanerFileItem(
-                        url: browserPath,
-                        name: "\(parentName) \(browserPath.lastPathComponent)",
-                        size: size,
-                        groupId: "systemCache"
-                    ))
-                }
-            }
-        }
-        
+        // Browser caches are scanned by their explicit Cache/GPUCache paths;
+        // Service Worker roots contain persistent registrations and offline data.
+
         // 5. 扫描 Group Containers 缓存
         let groupContainersURL = home.appendingPathComponent("Library/Group Containers")
         if let groups = try? fileManager.contentsOfDirectory(at: groupContainersURL, includingPropertiesForKeys: nil) {
@@ -1398,56 +1476,21 @@ class SmartCleanerService: ObservableObject {
         return items.sorted { $0.size > $1.size }
     }
     
-    // MARK: - 旧更新扫描
-    private func scanOldUpdates() async -> [CleanerFileItem] {
-        var items: [CleanerFileItem] = []
-        let paths = [
-            "/Library/Updates",
-            "~/Library/Caches/com.apple.SoftwareUpdate"
-        ]
-        
-        for pathStr in paths {
-            let expandedPath = NSString(string: pathStr).expandingTildeInPath
-            let url = URL(fileURLWithPath: expandedPath)
-            guard fileManager.fileExists(atPath: url.path) else { continue }
-            
-            if let contents = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
-                for itemURL in contents {
-                    let size = calculateSize(at: itemURL)
-                    if size > 0 {
-                        items.append(CleanerFileItem(
-                            url: itemURL,
-                            name: itemURL.lastPathComponent,
-                            size: size,
-                            groupId: "oldUpdates"
-                        ))
-                    }
-                }
-            }
+    // MARK: - Installation leftovers requiring manual review
+    func scanInstallationResidues() async -> [CleanerFileItem] {
+        let candidates: [InstallationResidue]
+        if let installationResidueScan {
+            candidates = await installationResidueScan()
+        } else {
+            candidates = await InstallationResidueScanner().scan(shouldCancel: {
+                self.shouldStopScanning || Task.isCancelled
+            })
         }
-        
-        // 检查下载的 DMG/PKG 安装包及压缩包 (扩展到通用下载残留)
-        let downloadsURL = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
-        if let contents = try? fileManager.contentsOfDirectory(at: downloadsURL, includingPropertiesForKeys: [.fileSizeKey, .creationDateKey]) {
-            let junkExtensions = ["dmg", "pkg", "app", "iso", "ipsw", "zip", "rar", "7z", "tar", "gz", "tgz"]
-            
-            for itemURL in contents {
-                let ext = itemURL.pathExtension.lowercased()
-                if junkExtensions.contains(ext) {
-                    let size = calculateSize(at: itemURL)
-                    if size > 0 {
-                        items.append(CleanerFileItem(
-                            url: itemURL,
-                            name: itemURL.lastPathComponent,
-                            size: size,
-                            groupId: "oldUpdates"
-                        ))
-                    }
-                }
-            }
+        guard !shouldStopScanning && !Task.isCancelled else { return [] }
+        return candidates.map { candidate in
+            CleanerFileItem(url: candidate.url, name: candidate.name, size: candidate.size,
+                            groupId: "oldUpdates", isSelected: false, installationResidue: candidate)
         }
-        
-        return items.sorted { $0.size > $1.size }
     }
     
     // MARK: - 用户缓存扫描 (全面扫描整个用户缓存目录 + 已安装应用缓存 + 卸载残留)
@@ -1573,50 +1616,18 @@ class SmartCleanerService: ObservableObject {
                     }
                 }
                 
-                // 扫描容器的临时文件
                 let containerTmpURL = containerURL.appendingPathComponent("Data/tmp")
-                if fileManager.fileExists(atPath: containerTmpURL.path) {
-                    let size = calculateSize(at: containerTmpURL)
-                    if size > 50 * 1024 {
-                        let fileItem = CleanerFileItem(
-                            url: containerTmpURL,
-                            name: "\(appName) 临时文件",
-                            size: size,
-                            groupId: "userCache"
-                        )
-                        addItem(fileItem, bundleId)
+                for url in TemporaryCleanupPolicy.eligibleFiles(in: containerTmpURL, shouldCancel: { self.shouldStopScanning || Task.isCancelled }) {
+                    let size = calculateSize(at: url)
+                    if size > 0 {
+                        addItem(CleanerFileItem(url: url, name: "\(appName) 临时文件", size: size, groupId: "userCache"), bundleId)
                     }
                 }
             }
         }
         
-        // 3. 扫描 ~/Library/Saved Application State
-        // ⚠️ 安全改进：跳过已安装应用的状态文件
-        _ = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier?.lowercased() }) // Unused currently
-        let savedStateURL = home.appendingPathComponent("Library/Saved Application State")
-        if let contents = try? fileManager.contentsOfDirectory(at: savedStateURL, includingPropertiesForKeys: nil) {
-            for itemURL in contents {
-                let bundleId = itemURL.lastPathComponent.replacingOccurrences(of: ".savedState", with: "")
-                // if runningAppIds.contains(bundleId.lowercased()) { continue }
-                
-                // ⚠️ 跳过已安装应用的状态文件
-                // if installedAppBundleIds.contains(bundleId.lowercased()) {
-                //    continue
-                // }
-                
-                let size = calculateSize(at: itemURL)
-                if size > 5 * 1024 {
-                    let fileItem = CleanerFileItem(
-                        url: itemURL,
-                        name: "\(formatAppName(bundleId)) 状态",
-                        size: size,
-                        groupId: "userCache"
-                    )
-                    addItem(fileItem, bundleId)
-                }
-            }
-        }
-        
+        // Saved Application State can contain recovery state; it is not junk.
+
         // 4. 扫描 ~/Library/Application Support 中的缓存目录
         // ⚠️ 安全改进：跳过已安装应用的缓存目录
         let appSupportURL = home.appendingPathComponent("Library/Application Support")
@@ -1672,34 +1683,9 @@ class SmartCleanerService: ObservableObject {
         // 6. 已移除 ~/Library/Cookies 扫描 - 删除会导致所有网站登录状态丢失
         // 如需清理 Cookies，请使用隐私清理模块并明确确认
         
-        // 7. 扫描 ~/Library/WebKit
-        let webkitURL = home.appendingPathComponent("Library/WebKit")
-        if fileManager.fileExists(atPath: webkitURL.path) {
-            let size = calculateSize(at: webkitURL)
-            if size > 50 * 1024 {
-                items.append(CleanerFileItem(
-                    url: webkitURL,
-                    name: "WebKit 缓存",
-                    size: size,
-                    groupId: "userCache"
-                ))
-            }
-        }
-        
-        // 8. 扫描 ~/Library/HTTPStorages
-        let httpStorageURL = home.appendingPathComponent("Library/HTTPStorages")
-        if fileManager.fileExists(atPath: httpStorageURL.path) {
-            let size = calculateSize(at: httpStorageURL)
-            if size > 5 * 1024 {
-                items.append(CleanerFileItem(
-                    url: httpStorageURL,
-                    name: "HTTP 存储",
-                    size: size,
-                    groupId: "userCache"
-                ))
-            }
-        }
-        
+        // WebKit and HTTPStorages contain cookies and persistent website data.
+        // Never treat their roots as automatically disposable cache.
+
         // 9. 扫描 ~/Library/Logs 作为用户缓存的一部分
         let logsURL = home.appendingPathComponent("Library/Logs")
         if let logs = try? fileManager.contentsOfDirectory(at: logsURL, includingPropertiesForKeys: nil) {
@@ -1722,7 +1708,7 @@ class SmartCleanerService: ObservableObject {
             }
         }
         
-        // 10. 扫描 ~/.Trash (废纸篓) - 已移动到 scanTrash()
+        // Trash is managed by its dedicated module.
         
         // 11. 开发者工具缓存 (IDEA, VSCode, Cursor, Navicat 等)
         let developerPaths: [(name: String, path: String, appIdentifier: String)] = [
@@ -1733,12 +1719,10 @@ class SmartCleanerService: ObservableObject {
             // VSCode
             ("VSCode Caches", "Library/Caches/com.microsoft.VSCode", "com.microsoft.VSCode"),
             ("VSCode CachedData", "Library/Application Support/Code/CachedData", "com.microsoft.VSCode"),
-            ("VSCode Workspace Storage", "Library/Application Support/Code/User/workspaceStorage", "com.microsoft.VSCode"),
             
             // Cursor
             ("Cursor Caches", "Library/Caches/com.tull.cursor", "com.tull.cursor"),
             ("Cursor Caches", "Library/Caches/Cursor", "com.tull.cursor"),
-            ("Cursor Workspace Storage", "Library/Application Support/Cursor/User/workspaceStorage", "com.tull.cursor"),
             ("Cursor CachedData", "Library/Application Support/Cursor/CachedData", "com.tull.cursor"),
             
             // Navicat
@@ -1776,25 +1760,6 @@ class SmartCleanerService: ObservableObject {
     }
     
     // MARK: - 废纸篓扫描
-    private func scanTrash() async -> [CleanerFileItem] {
-        var items: [CleanerFileItem] = []
-        let home = fileManager.homeDirectoryForCurrentUser
-        let trashURL = home.appendingPathComponent(".Trash")
-        
-        if fileManager.fileExists(atPath: trashURL.path) {
-            let size = calculateSize(at: trashURL)
-            if size > 1024 { // > 1KB
-                items.append(CleanerFileItem(
-                    url: trashURL,
-                    name: "🗑️ 废纸篓",
-                    size: size,
-                    groupId: "trash"
-                ))
-            }
-        }
-        return items
-    }
-    
     // MARK: - 辅助方法：获取已安装应用信息（改进版）
     /// 返回 (bundleIds, appNames, appMap) 元组，用于更精确的匹配和展示
     private func getInstalledAppInfo() -> (bundleIds: Set<String>, appNames: Set<String>, appMap: [String: (name: String, path: URL, bundleId: String?)]) {
@@ -2673,74 +2638,40 @@ class SmartCleanerService: ObservableObject {
     }
     
     // MARK: - 删除选中文件
+    @MainActor
     func deleteSelectedFiles(from category: CleanerCategory) async -> (success: Int, failed: Int, size: Int64) {
-        var success = 0
-        var failed = 0
-        var freedSize: Int64 = 0
-        
+        guard !isCleaning && !isScanning else { return (0, 0, 0) }
+        let candidates: [CleanerFileItem]
         switch category {
-        case .duplicates:
-            for i in 0..<duplicateGroups.count {
-                for j in 0..<duplicateGroups[i].files.count {
-                    if duplicateGroups[i].files[j].isSelected {
-                        if DeletionLogService.shared.logAndDelete(at: duplicateGroups[i].files[j].url, category: "Duplicates") {
-                            freedSize += duplicateGroups[i].files[j].size
-                            success += 1
-                        } else {
-                            failed += 1
-                        }
-                    }
-                }
-            }
-            await scanDuplicates()
-            
-        case .similarPhotos:
-            for i in 0..<similarPhotoGroups.count {
-                for j in 0..<similarPhotoGroups[i].files.count {
-                    if similarPhotoGroups[i].files[j].isSelected {
-                        if DeletionLogService.shared.logAndDelete(at: similarPhotoGroups[i].files[j].url, category: "SimilarPhotos") {
-                            freedSize += similarPhotoGroups[i].files[j].size
-                            success += 1
-                        } else {
-                            failed += 1
-                        }
-                    }
-                }
-            }
-            await scanSimilarPhotos()
-            
-        case .localizations:
-            for file in localizationFiles where file.isSelected {
-                // ⚠️ 安全修复: 使用 DeletionLogService 记录并删除
-                if DeletionLogService.shared.logAndDelete(at: file.url, category: "Localizations") {
-                    freedSize += file.size
-                    success += 1
-                } else {
-                    failed += 1
-                    print("[SmartCleaner] ⚠️ Failed to delete localization: \(file.name)")
-                }
-            }
-            await scanLocalizations()
-            
-        case .largeFiles:
-            for file in largeFiles where file.isSelected {
-                if DeletionLogService.shared.logAndDelete(at: file.url, category: "LargeFiles") {
-                    freedSize += file.size
-                    success += 1
-                } else {
-                    failed += 1
-                }
-            }
-            await scanLargeFiles()
-            
-        case .systemJunk, .systemCache, .oldUpdates, .userCache, .trash, .systemLogs, .userLogs, .virus, .appUpdates, .startupItems, .performanceApps:
-            // 系统垃圾及新类别使用统一清理或专用方法
-            break
+        case .duplicates: candidates = duplicateGroups.flatMap { Array($0.files.dropFirst()) }
+        case .similarPhotos: candidates = similarPhotoGroups.flatMap { Array($0.files.dropFirst()) }
+        case .largeFiles: candidates = largeFiles
+        default: return (0, 0, 0)
         }
-        
-        return (success, failed, freedSize)
+        isCleaning = true
+        cleaningWasStopped = false
+        setCleaningCancelled(false)
+        let before = CleanupDiskSnapshot.capture()
+        defer {
+            isCleaning = false
+            observedDiskSpaceChange = CleanupDiskSnapshot.capture()?.change(since: before)
+        }
+        var completed = Set<String>()
+        var failed = 0
+        var size: Int64 = 0
+        for file in await Self.uniqueFilesForCleanup(candidates.filter(\.isSelected)) {
+            if cleaningWasStopped || Task.isCancelled { break }
+            if await deleteCleanupFile(file, bypassProtection: category == .largeFiles) {
+                completed.insert(file.url.standardizedFileURL.resolvingSymlinksInPath().path)
+                size += file.size
+            } else { failed += 1 }
+        }
+        removeCleanedFiles(completed)
+        totalMovedToTrashSize += size
+        totalCleanedSize += size
+        return (completed.count, failed, size)
     }
-    
+
     // MARK: - 辅助方法
     
     private func md5Hash(of url: URL) -> String? {
@@ -2762,18 +2693,13 @@ class SmartCleanerService: ObservableObject {
         }
     }
     
-    private func calculateSize(at url: URL) -> Int64 {
-        var totalSize: Int64 = 0
-        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
-        
-        for case let fileURL as URL in enumerator {
-            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                totalSize += Int64(size)
-            }
-        }
-        return totalSize
+    func calculateSize(at url: URL) -> Int64 {
+        // Managed runtimes and installation archives must never be swallowed
+        // by an automatically selected parent cache directory.
+        guard !InstallationResidueScanner.excludesGenericCleanup(url) else { return 0 }
+        return CleanupFileSystem.logicalSize(at: url, shouldCancel: { self.shouldStopScanning || Task.isCancelled })
     }
-    
+
     // MARK: - 统计
     
     func selectedCount(for category: CleanerCategory) -> Int {
@@ -2833,6 +2759,8 @@ class SmartCleanerService: ObservableObject {
             stopCleaning()
             return
         }
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
         userCacheFiles = []
         systemCacheFiles = []
         oldUpdateFiles = []
@@ -2842,6 +2770,10 @@ class SmartCleanerService: ObservableObject {
         similarPhotoGroups = []
         localizationFiles = []
         largeFiles = []
+        trashFiles = []
+        totalMovedToTrashSize = 0
+        totalCleanedSize = 0
+        observedDiskSpaceChange = nil
         scanProgress = 0
         currentScanPath = ""
         
@@ -2996,23 +2928,30 @@ class SmartCleanerService: ObservableObject {
         cleaningWasStopped = false
         setCleaningCancelled(false)
         cleanedCategories = []
+        lastFailedCleanupFiles = []
         totalCleanedSize = 0
+        totalMovedToTrashSize = 0
+        observedDiskSpaceChange = nil
+        let diskBefore = CleanupDiskSnapshot.capture()
         totalResolvedThreats = 0
         totalOptimizedItems = 0
         defer {
             isCleaning = false
             cleaningCurrentCategory = nil
             cleaningDescription = ""
+            observedDiskSpaceChange = CleanupDiskSnapshot.capture()?.change(since: diskBefore)
         }
 
-        let junk = systemCacheFiles + userCacheFiles + oldUpdateFiles + trashFiles + systemLogFiles + userLogFiles
-            + appCacheGroups.flatMap(\.files)
+        let junk = allJunkFiles + trashFiles
         let batches: [(CleanerCategory, [CleanerFileItem], Bool)] = [
             (.systemJunk, junk, false),
             (.duplicates, duplicateGroups.flatMap { Array($0.files.dropFirst()) }, false),
             (.similarPhotos, similarPhotoGroups.flatMap { Array($0.files.dropFirst()) }, false),
             (.largeFiles, largeFiles, true)
         ]
+        let selectedCandidates = batches.flatMap { $0.1 }.filter(\.isSelected)
+        let selectedRootFiles = await Self.uniqueFilesForCleanup(selectedCandidates)
+        let selectedRoots = Set(selectedRootFiles.map { $0.url.standardizedFileURL.resolvingSymlinksInPath().path })
         var seen = Set<String>()
         var completed = Set<String>()
         var failedFiles: [CleanerFileItem] = []
@@ -3024,8 +2963,9 @@ class SmartCleanerService: ObservableObject {
             cleaningCurrentCategory = category
             for file in files where file.isSelected {
                 guard !cleaningWasStopped && !Task.isCancelled else { break }
-                let path = file.url.standardizedFileURL.path
-                guard seen.insert(path).inserted else { continue }
+                let path = file.url.standardizedFileURL.resolvingSymlinksInPath().path
+                guard selectedRoots.contains(file.url.standardizedFileURL.resolvingSymlinksInPath().path),
+                      seen.insert(path).inserted else { continue }
                 // A previously removed parent already accounts for this item.
                 guard !completed.contains(where: { path.hasPrefix($0 + "/") }) else { continue }
                 if await deleteCleanupFile(file, bypassProtection: bypassProtection) {
@@ -3033,6 +2973,7 @@ class SmartCleanerService: ObservableObject {
                     success += 1
                     size += file.size
                     totalCleanedSize = size
+                    totalMovedToTrashSize += file.size
                 } else {
                     failed += 1
                     failedFiles.append(file)
@@ -3072,6 +3013,7 @@ class SmartCleanerService: ObservableObject {
             NSWorkspace.shared.open(url)
         }
         if Task.isCancelled { cleaningWasStopped = true }
+        lastFailedCleanupFiles = failedFiles
         return (success, failed, size, failedFiles)
     }
 
@@ -3082,40 +3024,64 @@ class SmartCleanerService: ObservableObject {
         isCleaning = true
         cleaningWasStopped = false
         setCleaningCancelled(false)
-        defer { isCleaning = false }
+        let diskBefore = CleanupDiskSnapshot.capture()
+        defer {
+            isCleaning = false
+            observedDiskSpaceChange = CleanupDiskSnapshot.capture()?.change(since: diskBefore)
+        }
         var success = 0
-        var failed = 0
         var size: Int64 = 0
         var seen = Set<String>()
         var completed = Set<String>()
-        let selectedLargePaths = Set(largeFiles.filter(\.isSelected).map { $0.url.standardizedFileURL.path })
-        for file in files {
+        let selectedLargePaths = Set(largeFiles.filter(\.isSelected).map { $0.url.standardizedFileURL.resolvingSymlinksInPath().path })
+        for file in await Self.uniqueFilesForCleanup(files) {
             guard !cleaningWasStopped && !Task.isCancelled else { break }
-            let path = file.url.standardizedFileURL.path
+            let path = file.url.standardizedFileURL.resolvingSymlinksInPath().path
             guard seen.insert(path).inserted else { continue }
             if await deleteCleanupFile(file, bypassProtection: selectedLargePaths.contains(path)) {
                 completed.insert(path)
                 success += 1
                 size += file.size
-            } else { failed += 1 }
+            }
             await Task.yield()
         }
         removeCleanedFiles(completed)
         totalCleanedSize += size
-        return (success, failed, size)
+        totalMovedToTrashSize += size
+        if Task.isCancelled { cleaningWasStopped = true }
+        // Retain original failures which were never attempted after Stop as well
+        // as attempts that failed. A successful parent accounts for descendants.
+        var retainedPaths = Set<String>()
+        lastFailedCleanupFiles = files.filter { file in
+            let path = file.url.standardizedFileURL.resolvingSymlinksInPath().path
+            let removed = completed.contains(path) || completed.contains { path.hasPrefix($0 + "/") }
+            return !removed && retainedPaths.insert(path).inserted
+        }
+        return (success, lastFailedCleanupFiles.count, size)
     }
 
     private func deleteCleanupFile(_ file: CleanerFileItem, bypassProtection: Bool) async -> Bool {
-        guard deletionAllowed(file.url, bypassProtection) else { return false }
-        let trash = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Trash").standardizedFileURL.path
-        let isInTrash = file.url.standardizedFileURL.path.hasPrefix(trash + "/")
-        return await cleanupFile(file.url, isInTrash)
+        let path = file.url.standardizedFileURL.resolvingSymlinksInPath().path
+        let trash = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Trash").resolvingSymlinksInPath().path
+        guard path != trash && !path.hasPrefix(trash + "/"),
+              !file.url.pathComponents.contains(".Trashes") else { return false }
+        if let candidate = file.installationResidue {
+            guard file.url == candidate.url,
+                  !isCleaningCancelled() && !Task.isCancelled,
+                  await installationResidueValidator(candidate),
+                  !isCleaningCancelled() && !Task.isCancelled else { return false }
+        } else {
+            guard deletionAllowed(file.url, bypassProtection && !file.isDirectory) else { return false }
+        }
+        return await cleanupFile(file.url, false)
     }
 
     @MainActor
     private func removeCleanedFiles(_ paths: Set<String>) {
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
         let removed: (CleanerFileItem) -> Bool = { file in
-            let path = file.url.standardizedFileURL.path
+            let path = file.url.standardizedFileURL.resolvingSymlinksInPath().path
             return paths.contains(path) || paths.contains { path.hasPrefix($0 + "/") }
         }
         userCacheFiles.removeAll(where: removed)
@@ -3181,13 +3147,8 @@ class SmartCleanerService: ObservableObject {
     
     // 总可清理大小（只计算已选中的文件）
     var totalCleanableSize: Int64 {
-        // 系统垃圾分类
-        let userCacheSize = userCacheFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let systemCacheSize = systemCacheFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let oldUpdatesSize = oldUpdateFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
+        // Use the same deduplicated cached accounting as the results page.
         let trashSize = trashFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let systemLogsSize = systemLogFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
-        let userLogsSize = userLogFiles.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
         
         // 重复文件（只计算选中的文件）
         let dupSize = duplicateGroups.flatMap { $0.files }.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
@@ -3204,8 +3165,7 @@ class SmartCleanerService: ObservableObject {
         // 病毒威胁
         let virusSize = virusThreats.filter { $0.isSelected }.reduce(0) { $0 + $1.size }
         
-        return userCacheSize + systemCacheSize + oldUpdatesSize + trashSize +
-               systemLogsSize + userLogsSize + 
+        return systemJunkTotalSize + trashSize +
                dupSize + photoSize + locSize + largeSize + virusSize
     }
     
@@ -3293,61 +3253,32 @@ class SmartCleanerService: ObservableObject {
     // MARK: - 取消选择特定应用的文件的
     // MARK: - 取消选择特定应用的文件的
     func deselectFiles(for bundleId: String) {
+        beginJunkUpdates()
+        defer { endJunkUpdates() }
         let lowerBundleId = bundleId.lowercased()
-        
-        // 辅助检查闭包
         let shouldDeselect: (CleanerFileItem) -> Bool = { item in
-            return item.groupId.lowercased() == lowerBundleId || item.url.path.lowercased().contains(lowerBundleId)
+            // Match the original scanned path: an application's bundle ID may
+            // appear in an alias name but not in its resolved destination.
+            item.groupId.lowercased() == lowerBundleId || item.url.path.lowercased().contains(lowerBundleId)
         }
-        
-        // 使用索引遍历修改 User Cache
-        for i in 0..<userCacheFiles.count {
-            if shouldDeselect(userCacheFiles[i]) { userCacheFiles[i].isSelected = false }
-        }
-        
-        // System Cache
-        for i in 0..<systemCacheFiles.count {
-             if shouldDeselect(systemCacheFiles[i]) { systemCacheFiles[i].isSelected = false }
-        }
-        
-        // Old Updates
-        for i in 0..<oldUpdateFiles.count {
-             if shouldDeselect(oldUpdateFiles[i]) { oldUpdateFiles[i].isSelected = false }
-        }
-        
-        // Logs
-        for i in 0..<systemLogFiles.count {
-             if shouldDeselect(systemLogFiles[i]) { systemLogFiles[i].isSelected = false }
-        }
-        for i in 0..<userLogFiles.count {
-             if shouldDeselect(userLogFiles[i]) { userLogFiles[i].isSelected = false }
-        }
-        
-        // Localization
-        for i in 0..<localizationFiles.count {
-            if shouldDeselect(localizationFiles[i]) { localizationFiles[i].isSelected = false }
-        }
-        
-        // Large Files
-        for i in 0..<largeFiles.count {
-            if shouldDeselect(largeFiles[i]) { largeFiles[i].isSelected = false }
-        }
-
-        // App Groups
-        for group in appCacheGroups {
-            if group.bundleId?.lowercased() == lowerBundleId {
-                for i in 0..<group.files.count { group.files[i].isSelected = false }
-                group.objectWillChange.send()
-            } else {
-                var changed = false
-                for i in 0..<group.files.count {
-                    if shouldDeselect(group.files[i]) {
-                        group.files[i].isSelected = false
-                        changed = true
-                    }
-                }
-                if changed { group.objectWillChange.send() }
+        let update: ([CleanerFileItem]) -> [CleanerFileItem] = { files in
+            var result = files
+            for index in result.indices where shouldDeselect(result[index]) {
+                result[index].isSelected = false
             }
+            return result
+        }
+        userCacheFiles = update(userCacheFiles)
+        systemCacheFiles = update(systemCacheFiles)
+        oldUpdateFiles = update(oldUpdateFiles)
+        systemLogFiles = update(systemLogFiles)
+        userLogFiles = update(userLogFiles)
+        localizationFiles = update(localizationFiles)
+        largeFiles = update(largeFiles)
+        for group in appCacheGroups {
+            group.files = group.bundleId?.lowercased() == lowerBundleId
+                ? Self.settingSelection(group.files, to: false)
+                : update(group.files)
         }
     }
     

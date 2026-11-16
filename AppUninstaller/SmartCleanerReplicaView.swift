@@ -32,7 +32,7 @@ struct SmartCleanerReplicaView: View {
     }
 
     private var hasResults: Bool {
-        service.systemJunkTotalSize > 0 ||
+        service.hasJunkResults ||
         !service.duplicateGroups.isEmpty ||
         !service.similarPhotoGroups.isEmpty ||
         !service.largeFiles.isEmpty ||
@@ -152,7 +152,7 @@ struct SmartCleanerReplicaView: View {
                 Task {
                     let result = await service.retryFailedFiles(failedFiles)
                     guard !service.cleaningWasStopped else { return }
-                    if result.failed == 0 { failedFiles = [] }
+                    failedFiles = service.lastFailedCleanupFiles
                     cleaningFinished = result.failed == 0
                 }
             }
@@ -281,7 +281,13 @@ struct SmartCleanerReplicaView: View {
                 .foregroundColor(.white.opacity(0.48))
                 .padding(.top, 8)
 
-            Spacer().frame(height: 47)
+            Button(localized("查看废纸篓…", "Review Trash…")) { selectedModule = .trash }
+                .buttonStyle(.plain)
+                .foregroundColor(.cyan)
+                .font(.system(size: 11))
+                .padding(.top, 10)
+
+            Spacer().frame(height: 26)
 
             HStack(alignment: .top, spacing: 95) {
                 replicaColumn(
@@ -310,11 +316,11 @@ struct SmartCleanerReplicaView: View {
         VStack(spacing: 0) {
             Spacer().frame(height: 81)
 
-            Text(localized("做得不错！", "Nice work!"))
+            Text(localized("任务已完成", "Tasks Complete"))
                 .font(.system(size: 25, weight: .bold))
                 .foregroundColor(.white.opacity(0.96))
 
-            Text(localized("您的 Mac 状态很好。", "Your Mac is in great shape."))
+            Text(localized("移至废纸篓的文件仍占用磁盘空间。", "Files moved to Trash still occupy disk space."))
                 .font(.system(size: 13))
                 .foregroundColor(.white.opacity(0.48))
                 .padding(.top, 8)
@@ -322,12 +328,21 @@ struct SmartCleanerReplicaView: View {
             Spacer().frame(height: 47)
 
             HStack(alignment: .top, spacing: 95) {
-                replicaColumn(kind: .cleanup, status: .complete, result: .none)
+                replicaColumn(kind: .cleanup, status: .complete, result: .cleanup(service.totalMovedToTrashSize))
                 replicaColumn(kind: .protection, status: .complete, result: .none)
                 replicaColumn(kind: .speed, status: .complete, result: .none)
             }
 
-            Spacer(minLength: 100)
+            if let change = service.observedDiskSpaceChange {
+                Text(localized("磁盘可用空间变化：", "Observed free-space change: ")
+                     + (change > 0 ? "+" : "")
+                     + ByteCountFormatter.string(fromByteCount: change, countStyle: .file)
+                     + localized("（也受其他程序影响）", " (includes other system activity)"))
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.5))
+                    .padding(.top, 20)
+            }
+            Spacer(minLength: 80)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -468,11 +483,24 @@ struct SmartCleanerReplicaView: View {
                 }
                 .foregroundColor(color)
 
+                if cleaningFinished {
+                    Text(localized("已移至废纸篓（逻辑大小）", "Moved to Trash (logical size)"))
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.55))
+                } else if !service.oldUpdateFiles.isEmpty {
+                    Text(localized("安装残留与旧备份需在详情中手动勾选", "Review and select installation residues in Details"))
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.55))
+                        .multilineTextAlignment(.center)
+                }
                 Button {
-                    detailCategory = .systemJunk
-                    showDetailSheet = true
+                    if cleaningFinished { selectedModule = .trash }
+                    else {
+                        detailCategory = .systemJunk
+                        showDetailSheet = true
+                    }
                 } label: {
-                    Text(localized("查看详情...", "View Details..."))
+                    Text(cleaningFinished ? localized("查看废纸篓", "Review Trash") : localized("查看详情...", "View Details..."))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(Color(red: 0.42, green: 0.88, blue: 0.98))
                         .padding(.horizontal, 12)
@@ -717,14 +745,15 @@ struct SmartCleanerReplicaView: View {
 
     private func permissionFailureMessage(_ count: Int) -> String {
         loc.text(
-            simplifiedChinese: "有 \(count) 个文件因权限不足无法删除。",
-            traditionalChinese: "有 \(count) 個檔案因權限不足而無法刪除。",
-            english: "\(count) files could not be deleted due to permissions.",
-            japanese: "権限がないため \(count) 個のファイルを削除できませんでした。",
-            korean: "권한이 없어 파일 \(count)개를 삭제하지 못했습니다.",
-            russian: "Не удалось удалить файлов: \(count). Недостаточно прав."
+            simplifiedChinese: "有 \(count) 个项目未能处理，已保留原文件。原因可能是安全保护、文件状态变化或权限限制。",
+            traditionalChinese: "有 \(count) 個項目未能處理，已保留原檔案。原因可能是安全保護、檔案狀態變化或權限限制。",
+            english: "\(count) items were retained. Safety protection, changed files, or access restrictions may have prevented cleanup.",
+            japanese: "\(count) 項目を保持しました。安全保護、ファイルの変更、またはアクセス制限により処理できませんでした。",
+            korean: "항목 \(count)개를 보존했습니다. 안전 보호, 파일 변경 또는 접근 제한으로 처리하지 못했습니다.",
+            russian: "Сохранено элементов: \(count). Очистке могли помешать защита, изменения файлов или ограничения доступа."
         )
     }
+
 }
 
 private struct ReplicaIconMotion: ViewModifier {

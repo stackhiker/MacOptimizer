@@ -92,8 +92,8 @@ struct MemoryDetailView: View {
                         // Pressure Card
                         MemoryInfoCard(
                             title: loc.text("压力", "Pressure"),
-                            value: String(format: "%.0f%%", systemMonitor.memoryPressure * 100),
-                            desc: loc.text("Mac 现在可以随时处理更多任务。", "Your Mac is ready to handle more tasks."),
+                            value: systemMonitor.memoryPressureLevel.title(loc),
+                            desc: systemMonitor.memoryPressureLevel.isElevated ? loc.text("可退出不需要的应用以减轻内存压力。", "Quit applications you no longer need to reduce pressure.") : loc.text("macOS 会按需管理内存和文件缓存。", "macOS manages memory and file caches as needed."),
                             linkText: loc.text("了解更多", "Learn More")
                         )
                         

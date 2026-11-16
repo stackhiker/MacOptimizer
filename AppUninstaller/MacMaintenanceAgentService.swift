@@ -76,6 +76,7 @@ struct MacAgentCleanupResult: Sendable {
     let cleanedCount: Int
     let cleanedBytes: Int64
     let failedCount: Int
+    var failedPaths: Set<String> = []
 }
 
 @MainActor
@@ -84,6 +85,7 @@ final class MacMaintenanceAgentService: ObservableObject {
 
     @Published private(set) var lastReport: MacAgentToolReport?
     @Published private(set) var pendingCleanup: [MacAgentFinding] = []
+    @Published private(set) var isCleaning = false
 
     private init() {}
 
@@ -107,13 +109,14 @@ final class MacMaintenanceAgentService: ObservableObject {
         case .listResults:
             report = lastReport ?? .init(tool: .listResults, findings: [], facts: ["state": "no_previous_scan"])
         case .prepareCleanup:
+            guard !isCleaning else { return .init(tool: .prepareCleanup, findings: [], facts: ["state": "cleanup_in_progress"]) }
             let source: MacAgentToolReport
             if let lastReport {
                 source = lastReport
             } else {
                 source = await Task.detached(priority: .userInitiated) { Self.scanJunk(olderThanDays: 3) }.value
             }
-            let safe = source.findings.filter(Self.isSafeCleanupFinding)
+            let safe = source.findings.filter { Self.isSafeCleanupFinding($0) }
             pendingCleanup = safe
             report = .init(
                 tool: .prepareCleanup,
@@ -131,27 +134,44 @@ final class MacMaintenanceAgentService: ObservableObject {
     }
 
     func confirmCleanup() async -> MacAgentCleanupResult {
+        guard !isCleaning else { return .init(cleanedCount: 0, cleanedBytes: 0, failedCount: 0) }
         let targets = pendingCleanup
-        pendingCleanup = []
         guard !targets.isEmpty else { return .init(cleanedCount: 0, cleanedBytes: 0, failedCount: 0) }
+        isCleaning = true
+        defer { isCleaning = false }
+        let task = Task.detached(priority: .userInitiated) { await Self.cleanFindings(targets) }
+        let result = await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        pendingCleanup = targets.filter { result.failedPaths.contains($0.path) }
+        return result
+    }
 
-        return await Task.detached(priority: .userInitiated) {
-            var cleanedCount = 0
-            var cleanedBytes: Int64 = 0
-            var failedCount = 0
-            let manager = FileManager.default
-            for finding in targets where Self.isSafeCleanupFinding(finding) {
-                do {
-                    var resultingURL: NSURL?
-                    try manager.trashItem(at: URL(fileURLWithPath: finding.path), resultingItemURL: &resultingURL)
-                    cleanedCount += 1
-                    cleanedBytes += finding.size
-                } catch {
-                    failedCount += 1
+    nonisolated static func cleanFindings(
+        _ targets: [MacAgentFinding],
+        allowed: (MacAgentFinding) -> Bool = { isSafeCleanupFinding($0) },
+        moveToTrash: (URL) throws -> Void = { try DeletionLogService.shared.trashItem(at: $0, category: "MaintenanceAgent") },
+        recordFailure: (RemovalFailure) -> Void = { DeletionLogService.shared.logFailure($0, category: "MaintenanceAgent") }
+    ) async -> MacAgentCleanupResult {
+        var count = 0
+        var bytes: Int64 = 0
+        var failed = Set<String>()
+        var seen = Set<String>()
+        for finding in targets where seen.insert(finding.path).inserted {
+            let url = URL(fileURLWithPath: finding.path)
+            do {
+                guard !Task.isCancelled else { throw CancellationError() }
+                guard allowed(finding) else {
+                    throw NSError(domain: "CleanupSafety", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                        "The file changed, is protected, or is no longer eligible for cleanup."])
                 }
+                try moveToTrash(url)
+                count += 1
+                bytes += finding.size
+            } catch {
+                failed.insert(finding.path)
+                recordFailure(RemovalFailure(path: url, error: error))
             }
-            return .init(cleanedCount: cleanedCount, cleanedBytes: cleanedBytes, failedCount: failedCount)
-        }.value
+        }
+        return .init(cleanedCount: count, cleanedBytes: bytes, failedCount: failed.count, failedPaths: failed)
     }
 
     func cancelCleanup() {
@@ -164,7 +184,6 @@ final class MacMaintenanceAgentService: ObservableObject {
             (home.appendingPathComponent("Library/Caches", isDirectory: true), .userCache),
             (home.appendingPathComponent("Library/Logs", isDirectory: true), .userLog),
             (home.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true), .crashReport),
-            (home.appendingPathComponent("Library/Saved Application State", isDirectory: true), .savedState),
             (URL(fileURLWithPath: "/Library/Caches", isDirectory: true), .systemCache),
             (URL(fileURLWithPath: "/Library/Logs", isDirectory: true), .systemLog)
         ]
@@ -172,7 +191,7 @@ final class MacMaintenanceAgentService: ObservableObject {
         var findings: [MacAgentFinding] = []
         for (root, category) in roots {
             findings.append(contentsOf: enumerateFiles(at: root, category: category, limit: 20_000) { values in
-                guard let modified = values.contentModificationDate else { return true }
+                guard let modified = values.contentModificationDate else { return false }
                 return modified < cutoff
             })
             if findings.count >= 20_000 { break }
@@ -310,7 +329,7 @@ final class MacMaintenanceAgentService: ObservableObject {
 
         var results: [MacAgentFinding] = []
         for case let url as URL in enumerator {
-            if results.count >= limit { break }
+            if Task.isCancelled || results.count >= limit { break }
             guard let values = try? url.resourceValues(forKeys: Set(keys)),
                   values.isRegularFile == true,
                   values.isSymbolicLink != true,
@@ -325,20 +344,24 @@ final class MacMaintenanceAgentService: ObservableObject {
         return results
     }
 
-    nonisolated private static func isSafeCleanupFinding(_ finding: MacAgentFinding) -> Bool {
-        guard finding.category != .largeFile,
-              finding.category != .duplicateFile,
-              finding.category != .startupItem else { return false }
-        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
-        let allowedRoots = [
-            "\(home)/Library/Caches/",
-            "\(home)/Library/Logs/",
-            "\(home)/Library/Application Support/CrashReporter/",
-            "\(home)/Library/Saved Application State/",
-            "/Library/Caches/",
-            "/Library/Logs/"
-        ]
-        let normalized = URL(fileURLWithPath: finding.path).standardizedFileURL.path
-        return allowedRoots.contains(where: normalized.hasPrefix)
+    nonisolated static func isSafeCleanupFinding(
+        _ finding: MacAgentFinding,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        now: Date = Date(),
+        permitted: (URL) -> Bool = { SafetyGuard.shared.isSafeToDelete($0) }
+    ) -> Bool {
+        guard [.userCache, .userLog, .crashReport, .systemCache, .systemLog].contains(finding.category) else { return false }
+        let home = homeDirectory.standardizedFileURL.resolvingSymlinksInPath().path
+        let allowedRoots = ["\(home)/Library/Caches/", "\(home)/Library/Logs/",
+                            "\(home)/Library/Application Support/CrashReporter/", "/Library/Caches/", "/Library/Logs/"]
+        let url = URL(fileURLWithPath: finding.path).standardizedFileURL
+        let canonical = url.resolvingSymlinksInPath()
+        guard allowedRoots.contains(where: canonical.path.hasPrefix), url.path == canonical.path,
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true,
+              let modified = values.contentModificationDate, let scannedDate = finding.modifiedAt,
+              modified == scannedDate, now.timeIntervalSince(modified) >= 86400,
+              Int64(values.fileSize ?? -1) == finding.size, permitted(url) else { return false }
+        return true
     }
 }

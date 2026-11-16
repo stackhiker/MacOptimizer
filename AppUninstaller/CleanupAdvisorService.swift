@@ -67,7 +67,7 @@ final class CleanupAdvisorService {
             size: item.size,
             isDirectory: isDirectory,
             modifiedAt: values?.contentModificationDate,
-            contentPreview: contentPreview(for: item.path, isDirectory: isDirectory)
+            contentPreview: nil // Local rules need metadata only, not file contents.
         )
     }
     

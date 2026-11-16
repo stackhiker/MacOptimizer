@@ -21,9 +21,10 @@ struct DeletionResult: Sendable {
     let recoveredSize: Int64
     let failedFiles: [String]
     let errors: [String]
+    var wasStopped: Bool = false
     
     var isSuccessful: Bool {
-        failedCount == 0
+        failedCount == 0 && !wasStopped
     }
 }
 
@@ -101,6 +102,7 @@ class LargeFileScanner: ObservableObject {
     
     // Cleaning state
     @Published var isCleaning = false
+    @Published var cleaningProgress: Double = 0
     @Published var cleanedCount = 0
     @Published var cleanedSize: Int64 = 0
     @Published var isStopped = false
@@ -110,7 +112,10 @@ class LargeFileScanner: ObservableObject {
     private let deleteFile: (URL) throws -> Void
 
     init(deleteFile: @escaping (URL) throws -> Void = {
-        try FileManager.default.trashItem(at: $0, resultingItemURL: nil)
+        guard SafetyGuard.shared.isSafeToDelete($0, ignoreProtection: true) else {
+            throw NSError(domain: "CleanupSafety", code: 1, userInfo: [NSLocalizedDescriptionKey: "This system path is protected."])
+        }
+        try DeletionLogService.shared.trashItem(at: $0, category: "LargeFiles")
     }) {
         self.deleteFile = deleteFile
     }
@@ -120,6 +125,8 @@ class LargeFileScanner: ObservableObject {
         foundFiles.filter { selectedFiles.contains($0.id) }.reduce(0) { $0 + $1.size }
     }
     
+    func stopCleaning() { setStopRequested(true) }
+
     func stopScan() {
         setStopRequested(true)
         isStopped = true
@@ -397,6 +404,8 @@ class LargeFileScanner: ObservableObject {
         let canStart = await MainActor.run { () -> Bool in
             guard !self.isCleaning && !self.isScanning else { return false }
             self.isCleaning = true
+            self.cleaningProgress = 0
+            self.setStopRequested(false)
             return true
         }
         guard canStart else {
@@ -406,7 +415,9 @@ class LargeFileScanner: ObservableObject {
 
         let logger = Logger(subsystem: "com.appuninstaller", category: "LargeFileScanner")
         
-        for file in foundFiles where items.contains(file.id) {
+        let targets = await MainActor.run { foundFiles.filter { items.contains($0.id) } }
+        for (index, file) in targets.enumerated() {
+            if isStopRequested || Task.isCancelled { break }
             do {
                 try deleteFile(file.url)
                 successCount += 1
@@ -420,8 +431,10 @@ class LargeFileScanner: ObservableObject {
                 errors.append("\(file.name): \(errorDescription)")
                 logger.error("Failed to delete \(file.url.path): \(error.localizedDescription)")
             }
+            await MainActor.run { cleaningProgress = Double(index + 1) / Double(max(1, targets.count)) }
         }
-        
+        let stopped = isStopRequested || Task.isCancelled
+
         // Re-scan or just remove directly from array
         let remainingFiles = foundFiles.filter { !deletedIDs.contains($0.id) }
         let newTotal = remainingFiles.reduce(0) { $0 + $1.size }
@@ -431,7 +444,8 @@ class LargeFileScanner: ObservableObject {
             failedCount: failedCount,
             recoveredSize: recoveredSize,
             failedFiles: failedFiles,
-            errors: errors
+            errors: errors,
+            wasStopped: stopped
         )
         
         // Batch UI updates

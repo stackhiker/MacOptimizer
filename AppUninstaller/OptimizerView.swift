@@ -44,7 +44,7 @@ enum OptimizerTask: String, CaseIterable, Identifiable {
         case .networkOptimize: return "Network Optimization"
         case .bootOptimize: return "Speed Up Boot"
         case .memoryOptimize: return "Memory Optimization"
-        case .appAccelerate: return "App Acceleration"
+        case .appAccelerate: return "Old App Cache Files"
         case .heavyConsumers: return "Heavy Consumers"
         case .launchAgents: return "Launch Agents"
         case .hungApps: return "Hung Applications"
@@ -53,13 +53,13 @@ enum OptimizerTask: String, CaseIterable, Identifiable {
     
     var englishDescription: String {
         switch self {
-        case .networkOptimize: return "Flush DNS cache and clear network caches to resolve connectivity issues and DNS errors."
+        case .networkOptimize: return "Refresh DNS cache and report whether the system accepted the commands. Network settings are kept."
         case .bootOptimize: return "Disable unnecessary launch agents and login items to speed up Mac startup."
-        case .memoryOptimize: return "Free up RAM, terminate background processes to improve system responsiveness."
-        case .appAccelerate: return "Clean app caches, optimize databases to make apps launch faster."
+        case .memoryOptimize: return "Choose unneeded applications to quit normally, then inspect memory usage and pressure."
+        case .appAccelerate: return "Move eligible app cache files untouched for 30 days to Trash. Running apps are skipped."
         case .heavyConsumers: return "Quit apps that are using too much processing power."
         case .launchAgents: return "Manage helper applications that launch automatically."
-        case .hungApps: return "Force quit applications that are not responding."
+        case .hungApps: return "Request a normal quit; save dialogs and applications that remain running are respected."
         }
     }
     
@@ -70,7 +70,7 @@ enum OptimizerTask: String, CaseIterable, Identifiable {
         case .networkOptimize: values = [.chinese: "网络优化", .traditionalChinese: "網路最佳化", .english: "Network Optimization", .japanese: "ネットワーク最適化", .korean: "네트워크 최적화", .russian: "Оптимизация сети"]
         case .bootOptimize: values = [.chinese: "启动加速", .traditionalChinese: "啟動加速", .english: "Speed Up Boot", .japanese: "起動を高速化", .korean: "부팅 속도 향상", .russian: "Ускорение запуска"]
         case .memoryOptimize: values = [.chinese: "内存优化", .traditionalChinese: "記憶體最佳化", .english: "Memory Optimization", .japanese: "メモリ最適化", .korean: "메모리 최적화", .russian: "Оптимизация памяти"]
-        case .appAccelerate: values = [.chinese: "应用加速", .traditionalChinese: "應用程式加速", .english: "App Acceleration", .japanese: "アプリ高速化", .korean: "앱 가속", .russian: "Ускорение приложений"]
+        case .appAccelerate: values = [.chinese: "清理旧应用缓存", .traditionalChinese: "清理舊應用程式快取", .english: "Old App Cache Files", .japanese: "古いアプリキャッシュ", .korean: "오래된 앱 캐시", .russian: "Старый кэш приложений"]
         case .heavyConsumers: values = [.chinese: "高资源占用应用", .traditionalChinese: "高資源佔用應用程式", .english: "Heavy Consumers", .japanese: "高負荷アプリ", .korean: "리소스 과다 사용 앱", .russian: "Ресурсоёмкие приложения"]
         case .launchAgents: values = [.chinese: "启动代理", .traditionalChinese: "啟動代理程式", .english: "Launch Agents", .japanese: "起動エージェント", .korean: "시작 에이전트", .russian: "Агенты запуска"]
         case .hungApps: values = [.chinese: "无响应的应用", .traditionalChinese: "無回應的應用程式", .english: "Hung Applications", .japanese: "応答しないアプリ", .korean: "응답하지 않는 앱", .russian: "Зависшие приложения"]
@@ -79,11 +79,14 @@ enum OptimizerTask: String, CaseIterable, Identifiable {
     }
     
     func description(for language: AppLanguage) -> String {
+        if self == .appAccelerate { return language == .chinese ? "将 30 天未修改且未访问的旧缓存文件移到废纸篓，跳过运行中的应用。" : englishDescription }
+        if self == .hungApps { return language == .chinese ? "请求正常退出，保留保存对话框和仍在运行的应用。" : englishDescription }
+        if self == .networkOptimize { return language == .chinese ? "刷新 DNS 缓存并报告实际结果，保留网络设置。" : englishDescription }
         let values: [AppLanguage: String]
         switch self {
         case .networkOptimize: values = [.chinese: "刷新 DNS 与网络缓存，帮助解决连接和域名解析问题。", .traditionalChinese: "重新整理 DNS 與網路快取，協助解決連線和網域解析問題。", .english: englishDescription, .japanese: "DNSとネットワークキャッシュを更新し、接続や名前解決の問題を改善します。", .korean: "DNS 및 네트워크 캐시를 새로 고쳐 연결과 도메인 확인 문제를 해결합니다.", .russian: "Обновляет кэш DNS и сети, помогая устранить проблемы подключения и разрешения имён."]
         case .bootOptimize: values = [.chinese: "管理不必要的启动代理和登录项，加快 Mac 启动速度。", .traditionalChinese: "管理不必要的啟動代理程式和登入項目，加快 Mac 啟動速度。", .english: englishDescription, .japanese: "不要な起動エージェントとログイン項目を管理し、Macの起動を高速化します。", .korean: "불필요한 시작 에이전트와 로그인 항목을 관리하여 Mac 부팅 속도를 높입니다.", .russian: "Управляет ненужными агентами запуска и объектами входа, ускоряя запуск Mac."]
-        case .memoryOptimize: values = [.chinese: "释放内存并减少后台占用，提升系统响应速度。", .traditionalChinese: "釋放記憶體並減少背景佔用，提升系統回應速度。", .english: englishDescription, .japanese: "メモリを解放してバックグラウンドの使用量を減らし、応答性を向上させます。", .korean: "메모리를 확보하고 백그라운드 사용량을 줄여 시스템 반응 속도를 높입니다.", .russian: "Освобождает память и снижает фоновую нагрузку, повышая отзывчивость системы."]
+        case .memoryOptimize: values = [.chinese: "选择不需要的应用并正常退出，查看内存占用和压力变化。", .traditionalChinese: "釋放記憶體並減少背景佔用，提升系統回應速度。", .english: englishDescription, .japanese: "メモリを解放してバックグラウンドの使用量を減らし、応答性を向上させます。", .korean: "메모리를 확보하고 백그라운드 사용량을 줄여 시스템 반응 속도를 높입니다.", .russian: "Освобождает память и снижает фоновую нагрузку, повышая отзывчивость системы."]
         case .appAccelerate: values = [.chinese: "清理应用缓存并优化数据，让应用启动更快。", .traditionalChinese: "清理應用程式快取並最佳化資料，讓應用程式啟動更快。", .english: englishDescription, .japanese: "アプリのキャッシュとデータを最適化し、起動を高速化します。", .korean: "앱 캐시와 데이터를 최적화하여 앱을 더 빠르게 실행합니다.", .russian: "Оптимизирует кэш и данные приложений, ускоряя их запуск."]
         case .heavyConsumers: values = [.chinese: "找出占用过多处理器或内存的应用，并在不需要时将其关闭。", .traditionalChinese: "找出佔用過多處理器或記憶體的應用程式，並在不需要時將其關閉。", .english: englishDescription, .japanese: "CPUやメモリを大量に使用するアプリを見つけ、不要な場合は終了します。", .korean: "CPU 또는 메모리를 과도하게 사용하는 앱을 찾아 필요하지 않을 때 종료합니다.", .russian: "Находит приложения с высокой нагрузкой на процессор или память и позволяет завершить ненужные."]
         case .launchAgents: values = [.chinese: "管理随应用自动启动的辅助程序。", .traditionalChinese: "管理隨應用程式自動啟動的輔助程式。", .english: englishDescription, .japanese: "アプリとともに自動起動する補助プログラムを管理します。", .korean: "앱과 함께 자동으로 실행되는 도우미 프로그램을 관리합니다.", .russian: "Управляет вспомогательными программами, запускаемыми автоматически."]
@@ -110,6 +113,7 @@ struct OptimizerProcessItem: Identifiable, Equatable {
     let icon: NSImage
     let usageDescription: String // e.g. "15% CPU" or "500 MB"
     var isSelected: Bool = false
+    var bundleIdentifier: String? = nil
 }
 
 struct LaunchAgentItem: Identifiable, Equatable {
@@ -145,11 +149,20 @@ class OptimizerService: ObservableObject {
     @Published var highMemoryApps: [OptimizerProcessItem] = []
     @Published var showMemoryConfirmAlert = false
     @Published var memoryAlertIgnored = false
+    @Published private(set) var memoryConfirmation: MemoryConfirmation = .pending
+    @Published var taskMessages: [OptimizerTask: String] = [:]
+    @Published var failedTasks: Set<OptimizerTask> = []
     
     // 启动加速 - 启动项列表
     @Published var bootAgentsToDisable: [LaunchAgentItem] = []
     @Published var showBootConfirmAlert = false
     @Published var bootAlertIgnored = false
+    private var bootTaskSucceeded = false
+    private let taskExecutor: (@MainActor (OptimizerTask) async -> Bool)?
+
+    init(taskExecutor: (@MainActor (OptimizerTask) async -> Bool)? = nil) {
+        self.taskExecutor = taskExecutor
+    }
     
     func toggleTaskSelection(_ task: OptimizerTask) {
         if selectedTasks.contains(task) {
@@ -186,13 +199,28 @@ class OptimizerService: ObservableObject {
     }
     
     // 批量执行所有选中的任务
+    @MainActor
     func executeAllSelectedTasks() async {
-        await MainActor.run {
-            isExecuting = true
-            executionWasCancelled = false
-            completedTasks.removeAll()
-            executionProgress = 0.0
-            showResults = false
+        guard !isExecuting, !Task.isCancelled else { return }
+        isExecuting = true
+        executionWasCancelled = false
+        completedTasks.removeAll()
+        failedTasks.removeAll()
+        taskMessages.removeAll()
+        executionProgress = 0
+        showResults = false
+        memoryConfirmation = .pending
+        memoryAlertIgnored = false
+        showMemoryConfirmAlert = false
+        bootAlertIgnored = false
+        bootTaskSucceeded = false
+        showBootConfirmAlert = false
+        defer {
+            if Task.isCancelled { executionWasCancelled = true; showResults = false }
+            executingTask = nil
+            showMemoryConfirmAlert = false
+            showBootConfirmAlert = false
+            isExecuting = false
         }
         
         let tasksToExecute = Array(selectedTasks).sorted { $0.rawValue < $1.rawValue }
@@ -205,19 +233,19 @@ class OptimizerService: ObservableObject {
                 executionProgress = Double(index) / Double(totalTasks)
             }
             
-            await executeTask(task)
+            let succeeded = await executeTask(task)
 
             if executionWasCancelled || Task.isCancelled { break }
             
             await MainActor.run {
-                _ = completedTasks.insert(task)
+                if succeeded { _ = completedTasks.insert(task) }
+                else { _ = failedTasks.insert(task) }
             }
         }
         
         await MainActor.run {
             executingTask = nil
-            isExecuting = false
-            if executionWasCancelled {
+            if executionWasCancelled || Task.isCancelled {
                 showResults = false
             } else {
                 executionProgress = 1.0
@@ -226,31 +254,49 @@ class OptimizerService: ObservableObject {
         }
     }
 
+    @MainActor
     func cancelExecution() {
+        guard isExecuting else { return }
         executionWasCancelled = true
+        memoryConfirmation = .cancelled
+        showMemoryConfirmAlert = false
+        showBootConfirmAlert = false
+    }
+
+    @MainActor
+    func confirmMemoryApplications() {
+        guard showMemoryConfirmAlert, !executionWasCancelled else { return }
+        memoryConfirmation = .confirmed
+        showMemoryConfirmAlert = false
+    }
+
+    @MainActor
+    func cancelMemoryApplications() {
+        memoryAlertIgnored = true
+        memoryConfirmation = .cancelled
+        showMemoryConfirmAlert = false
     }
     
     // 执行单个任务
-    private func executeTask(_ task: OptimizerTask) async {
+    private func executeTask(_ task: OptimizerTask) async -> Bool {
+        if let taskExecutor { return await taskExecutor(task) }
         switch task {
         case .networkOptimize:
-            await performNetworkOptimization()
+            return await performNetworkOptimization()
         case .bootOptimize:
-            await performBootOptimization()
+            return await performBootOptimization()
         case .memoryOptimize:
-            await performMemoryOptimization()
+            return await performMemoryOptimization()
         case .appAccelerate:
-            await performAppAcceleration()
+            return await performAppAcceleration()
         case .heavyConsumers:
-            await cleanupHeavyConsumers()
+            return await cleanupHeavyConsumers()
         case .launchAgents:
-            await cleanupLaunchAgents()
+            return await cleanupLaunchAgents()
         case .hungApps:
-            await cleanupHungApps()
+            return await cleanupHungApps()
         }
         
-        // 模拟执行时间
-        try? await Task.sleep(nanoseconds: 500_000_000)
     }
     
     @MainActor
@@ -277,11 +323,11 @@ class OptimizerService: ObservableObject {
                          // Get app name and icon
                         if let app = NSRunningApplication(processIdentifier: pid) {
                             // Exclude self
-                            if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { continue }
+                            if app.processIdentifier == ProcessInfo.processInfo.processIdentifier || app.activationPolicy != .regular || app.bundleIdentifier == "com.apple.finder" { continue }
                             
                             // Only show apps with icons (user visible)
                             if let icon = app.icon, let name = app.localizedName {
-                                items.append(OptimizerProcessItem(id: pid, name: name, icon: icon, usageDescription: String(format: "%.1f%% CPU", cpu)))
+                                items.append(OptimizerProcessItem(id: pid, name: name, icon: icon, usageDescription: String(format: "%.1f%% CPU", cpu), bundleIdentifier: app.bundleIdentifier))
                             }
                         }
                     }
@@ -340,13 +386,13 @@ class OptimizerService: ObservableObject {
              let lines = output.components(separatedBy: .newlines)
              for line in lines {
                  let parts = line.trimmingCharacters(in: .whitespaces).components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-                 if parts.count >= 3, let pid = Int32(parts[0]) {
+                 if parts.count >= 3, (parts[1].contains("U") || parts[1].contains("Z")), let pid = Int32(parts[0]) {
                      // Check if it's a gui app
                      if let app = NSRunningApplication(processIdentifier: pid), let icon = app.icon, let name = app.localizedName {
-                         if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { continue } // Exclude self
+                         if app.processIdentifier == ProcessInfo.processInfo.processIdentifier || app.activationPolicy != .regular || app.bundleIdentifier == "com.apple.finder" { continue } // Exclude self and system applications
                          let state = parts[1]
                          let desc = state.contains("Z") ? "Zombie" : "Unresponsive"
-                         items.append(OptimizerProcessItem(id: pid, name: name, icon: icon, usageDescription: desc))
+                         items.append(OptimizerProcessItem(id: pid, name: name, icon: icon, usageDescription: desc, bundleIdentifier: app.bundleIdentifier))
                      }
                  }
              }
@@ -356,132 +402,101 @@ class OptimizerService: ObservableObject {
     
     // MARK: - 清理任务执行
     
-    private func cleanupHeavyConsumers() async {
-        let itemsToKill = heavyProcesses.filter { $0.isSelected }
-        for item in itemsToKill {
-            kill(item.id, SIGKILL)
-        }
-        if !itemsToKill.isEmpty {
-            await fetchHeavyConsumers()
-        }
+    private func cleanupHeavyConsumers() async -> Bool {
+        let items = await MainActor.run { heavyProcesses.filter { $0.isSelected } }
+        let result = await quitApplications(items, for: .heavyConsumers)
+        await fetchHeavyConsumers()
+        return result
     }
-    
-    private func cleanupLaunchAgents() async {
-        let itemsToUnload = launchAgents.filter { $0.isSelected }
-        for item in itemsToUnload {
-            let task = Process()
-            task.launchPath = "/bin/launchctl"
-            task.arguments = ["bootout", "gui/\(getuid())", item.path]
-            try? task.run()
-            task.waitUntilExit()
+
+    private func cleanupLaunchAgents() async -> Bool {
+        let items = await MainActor.run { launchAgents.filter { $0.isSelected } }
+        var failures: [String] = []
+        var completed = 0
+        for item in items {
+            if executionWasCancelled || Task.isCancelled { break }
+            let result = runCheckedMaintenanceCommand("/bin/launchctl", ["bootout", "gui/\(getuid())", item.path])
+            if result.success { completed += 1 } else { failures.append(item.name + ": " + result.output) }
+            await Task.yield()
         }
-        if !itemsToUnload.isEmpty {
-            await fetchLaunchAgents()
+        let loc = LocalizationManager.shared
+        let finalFailures = failures
+        let finalCompleted = completed
+        await MainActor.run {
+            taskMessages[.launchAgents] = loc.text("已停止 \(finalCompleted) 个启动代理。", "Stopped \(finalCompleted) launch agents.")
+            if !finalFailures.isEmpty { taskMessages[.launchAgents, default: ""] += "\n" + finalFailures.joined(separator: "\n") }
         }
+        await fetchLaunchAgents()
+        return failures.isEmpty && completed == items.count && !executionWasCancelled && !Task.isCancelled
     }
-    
-    private func cleanupHungApps() async {
-        let itemsToKill = hungApps.filter { $0.isSelected }
-        for item in itemsToKill {
-            kill(item.id, SIGKILL)
-        }
-        if !itemsToKill.isEmpty {
-            await fetchHungApps()
-        }
+
+    private func cleanupHungApps() async -> Bool {
+        let items = await MainActor.run { hungApps.filter { $0.isSelected } }
+        let result = await quitApplications(items, for: .hungApps)
+        await fetchHungApps()
+        return result
     }
+
+    @MainActor
+    private func quitApplications(_ items: [OptimizerProcessItem], for task: OptimizerTask) async -> Bool {
+        let loc = LocalizationManager.shared
+        var exited = 0
+        var retained: [String] = []
+        for item in items {
+            if executionWasCancelled || Task.isCancelled { break }
+            guard let app = NSRunningApplication(processIdentifier: item.id) else {
+                exited += 1
+                continue
+            }
+            guard app.activationPolicy == .regular,
+                  app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+                  app.bundleIdentifier != "com.apple.finder",
+                  app.bundleIdentifier == item.bundleIdentifier else {
+                retained.append(item.name)
+                continue
+            }
+            let result = await requestGracefulTermination(request: { app.terminate() }, hasExited: { app.isTerminated },
+                                                          isCancelled: { self.executionWasCancelled || Task.isCancelled })
+            if result == .exited { exited += 1 } else { retained.append(item.name) }
+        }
+        var message = loc.text("已退出 \(exited) 个应用。", "Quit \(exited) applications.")
+        if !retained.isEmpty {
+            message += loc.text("仍在运行：", " Still running: ") + retained.joined(separator: ", ")
+            message += loc.text("。请先保存工作并手动退出。", ". Save your work and quit them manually.")
+        }
+        taskMessages[task] = message
+        return retained.isEmpty && !executionWasCancelled && !Task.isCancelled
+    }
+
     // MARK: - 网络优化
-    private func performNetworkOptimization() async {
-        // 1. 刷新 DNS 缓存
-        let dscacheutil = Process()
-        dscacheutil.executableURL = URL(fileURLWithPath: "/usr/bin/dscacheutil")
-        dscacheutil.arguments = ["-flushcache"]
-        try? dscacheutil.run()
-        dscacheutil.waitUntilExit()
-        
-        // 2. 重启 mDNSResponder（处理 DNS 解析）
-        let killall = Process()
-        killall.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        killall.arguments = ["-HUP", "mDNSResponder"]
-        try? killall.run()
-        killall.waitUntilExit()
-        
-        // 3. 清理 hosts 文件中的损坏条目（仅读取，不修改）
-        // 这可以帮助识别网络问题
-        
-        // 4. 清理网络缓存
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let networkCachePaths = [
-            home.appendingPathComponent("Library/Caches/com.apple.Safari/NetworkResources"),
-            home.appendingPathComponent("Library/Caches/com.apple.Safari/WebKitCache"),
-            home.appendingPathComponent("Library/Caches/Google/Chrome/Default/Cache"),
-            home.appendingPathComponent("Library/Caches/Firefox/Profiles"),
-        ]
-        
-        for path in networkCachePaths {
-            if FileManager.default.fileExists(atPath: path.path) {
-                try? FileManager.default.removeItem(at: path)
-            }
+    private func performNetworkOptimization() async -> Bool {
+        let loc = LocalizationManager.shared
+        let flush = runCheckedMaintenanceCommand("/usr/bin/dscacheutil", ["-flushcache"])
+        let responder = runCheckedMaintenanceCommand("/usr/bin/killall", ["-HUP", "mDNSResponder"])
+        let success = flush.success && responder.success
+        await MainActor.run {
+            taskMessages[.networkOptimize] = success
+                ? loc.text("DNS 缓存已刷新。网络设置已保留。", "DNS cache refreshed. Network settings were kept.")
+                : loc.text("DNS 刷新未完成：", "DNS refresh incomplete: ") + [flush.output, responder.output].filter { !$0.isEmpty }.joined(separator: "\n")
         }
-        
-        // 5. 清理系统网络配置缓存
-        let systemNetworkCachePaths = [
-            home.appendingPathComponent("Library/Preferences/com.apple.networkextension.plist"),
-            home.appendingPathComponent("Library/Preferences/com.apple.NetworkBrowser.plist"),
-        ]
-        
-        for path in systemNetworkCachePaths {
-            if FileManager.default.fileExists(atPath: path.path) {
-                // 只删除如果文件过大（可能损坏）
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: path.path),
-                   let fileSize = attrs[.size] as? Int64,
-                   fileSize > 1_000_000 { // 大于 1MB
-                    try? FileManager.default.removeItem(at: path)
-                }
-            }
-        }
-        
-        // 6. 清除网络位置缓存
-        let locationCache = home.appendingPathComponent("Library/Preferences/SystemConfiguration")
-        if FileManager.default.fileExists(atPath: locationCache.path) {
-            // 注意：这个操作可能需要重新配置网络，所以我们只记录
-            print("[NetworkOptimize] Network location cache exists at: \(locationCache.path)")
-        }
-        
-        print("[NetworkOptimize] DNS cache flushed, network caches cleared, connectivity improved")
+        return success
     }
-    
+
     // MARK: - 启动加速
-    private func performBootOptimization() async {
-        // 1. 扫描启动代理并识别可以禁用的项目
+    private func performBootOptimization() async -> Bool {
         await scanBootAgents()
-        
-        // 2. 如果有可禁用的启动项且用户没有忽略，等待用户确认
-        if !bootAgentsToDisable.isEmpty && !bootAlertIgnored {
-            await MainActor.run {
-                showBootConfirmAlert = true
-            }
-            
-            // 等待用户做出选择（最多等待30秒）
-            var waitTime = 0
-            while showBootConfirmAlert && waitTime < 30 {
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
-                waitTime += 1
-            }
-            
-            // 如果用户选择禁用启动项
-            if !bootAlertIgnored {
-                await disableSelectedBootAgents()
-            }
+        await MainActor.run {
+            bootAlertIgnored = false
+            bootTaskSucceeded = bootAgentsToDisable.isEmpty
+            showBootConfirmAlert = !bootAgentsToDisable.isEmpty
         }
-        
-        // 3. 清理登录项缓存
-        let loginItemsCache = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/com.apple.backgroundtaskmanagementagent")
-        try? FileManager.default.removeItem(at: loginItemsCache)
-        
-        print("[BootOptimize] Boot optimization completed")
+        while showBootConfirmAlert && !executionWasCancelled && !Task.isCancelled {
+            do { try await Task.sleep(nanoseconds: 100_000_000) }
+            catch { return false }
+        }
+        return bootTaskSucceeded && !executionWasCancelled && !Task.isCancelled
     }
-    
+
     // 扫描启动代理
     @MainActor
     private func scanBootAgents() {
@@ -543,197 +558,118 @@ class OptimizerService: ObservableObject {
     
     // 禁用选中的启动代理
     func disableSelectedBootAgents() async {
-        let itemsToDisable = await MainActor.run { bootAgentsToDisable.filter { $0.isSelected } }
-        
-        for item in itemsToDisable {
-            // 先尝试卸载
-            let unload = Process()
-            unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            unload.arguments = ["unload", "-w", item.path]
-            try? unload.run()
-            unload.waitUntilExit()
-            
-            // 重命名文件为 .disabled（更安全的方法）
-            let disabledPath = item.path.replacingOccurrences(of: ".plist", with: ".plist.disabled")
-            try? FileManager.default.moveItem(atPath: item.path, toPath: disabledPath)
+        guard !executionWasCancelled else { return }
+        let items = await MainActor.run { bootAgentsToDisable.filter { $0.isSelected } }
+        var failures: [String] = []
+        var completed = 0
+        for item in items {
+            if executionWasCancelled || Task.isCancelled { break }
+            let unload = runCheckedMaintenanceCommand("/bin/launchctl", ["unload", "-w", item.path])
+            guard unload.success else { failures.append(item.name + ": " + unload.output); continue }
+            do {
+                try FileManager.default.moveItem(atPath: item.path, toPath: item.path + ".disabled")
+                completed += 1
+            } catch { failures.append(item.name + ": " + error.localizedDescription) }
         }
-        
+        let loc = LocalizationManager.shared
+        let finalFailures = failures
+        let finalCompleted = completed
         await MainActor.run {
+            bootTaskSucceeded = !items.isEmpty && finalFailures.isEmpty && finalCompleted == items.count
+            taskMessages[.bootOptimize] = loc.text("已禁用 \(finalCompleted) 个启动代理。", "Disabled \(finalCompleted) launch agents.")
+            if !finalFailures.isEmpty { taskMessages[.bootOptimize, default: ""] += "\n" + finalFailures.joined(separator: "\n") }
             bootAgentsToDisable.removeAll()
             showBootConfirmAlert = false
-            bootAlertIgnored = false
         }
     }
-    
+
     // MARK: - 内存优化
-    private func performMemoryOptimization() async {
-        // 1. 首先检测高内存应用 (> 500MB)
-        await detectHighMemoryApps()
-        
-        // 2. 如果有高内存应用且用户没有忽略，等待用户确认
-        if !highMemoryApps.isEmpty && !memoryAlertIgnored {
+    private func performMemoryOptimization() async -> Bool {
+        let loc = LocalizationManager.shared
+        guard await detectHighMemoryApps() else { return false }
+        await MainActor.run {
+            memoryAlertIgnored = false
+            memoryConfirmation = .pending
+            showMemoryConfirmAlert = !highMemoryApps.isEmpty
+        }
+        if highMemoryApps.isEmpty {
             await MainActor.run {
-                showMemoryConfirmAlert = true
+                taskMessages[.memoryOptimize] = loc.text("未发现需要退出的高内存应用。", "No high-memory applications to quit.")
             }
-            
-            // 等待用户做出选择（最多等待30秒）
-            var waitTime = 0
-            while showMemoryConfirmAlert && waitTime < 30 {
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1秒
-                waitTime += 1
-            }
-            
-            // 如果用户选择关闭应用
-            if !memoryAlertIgnored {
-                await terminateSelectedMemoryApps()
+            return MemorySnapshot.read() != nil
+        }
+        // Closing the sheet or stopping the task is cancellation. Waiting is never approval.
+        let approved = await awaitExplicitMemoryConfirmation(
+            isPresented: { self.showMemoryConfirmAlert }, decision: { self.memoryConfirmation },
+            isCancelled: { self.executionWasCancelled || Task.isCancelled })
+        guard approved, !Task.isCancelled else {
+            await MainActor.run { taskMessages[.memoryOptimize] = loc.text("已跳过退出应用。", "Skipped quitting applications.") }
+            return false
+        }
+        let items = await MainActor.run { highMemoryApps.filter { $0.isSelected } }
+        guard !items.isEmpty else {
+            await MainActor.run { taskMessages[.memoryOptimize] = loc.text("未选择应用，未执行退出。", "No applications selected; none were quit.") }
+            return false
+        }
+        let before = MemorySnapshot.read()
+        let result = await quitApplications(items, for: .memoryOptimize)
+        if let before, let after = MemorySnapshot.read() {
+            let change = Int64(after.usedBytes) - Int64(before.usedBytes)
+            let amount = ByteCountFormatter.string(fromByteCount: abs(change), countStyle: .memory)
+            await MainActor.run {
+                taskMessages[.memoryOptimize, default: ""] += change <= 0
+                    ? loc.text(" 内存占用观测下降 \(amount)。", " Observed memory use decreased by \(amount).")
+                    : loc.text(" 内存占用观测上升 \(amount)。", " Observed memory use increased by \(amount).")
+                taskMessages[.memoryOptimize, default: ""] += loc.text(" 当前压力：", " Current pressure: ") + after.pressure.title(loc)
             }
         }
-        
-        // 3. 使用 memory_pressure 触发内存回收
-        let memPressure = Process()
-        memPressure.executableURL = URL(fileURLWithPath: "/usr/bin/memory_pressure")
-        memPressure.arguments = ["-l", "critical"]
-        try? memPressure.run()
-        
-        // 等待2秒让系统响应
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        memPressure.terminate()
-        
-        // 4. 尝试使用 purge 释放系统内存
-        let purge = Process()
-        purge.executableURL = URL(fileURLWithPath: "/usr/sbin/purge")
-        try? purge.run()
-        purge.waitUntilExit()
-        
-        print("[MemoryOptimize] Memory optimization completed")
+        await MainActor.run { highMemoryApps.removeAll() }
+        return result
     }
-    
+
     // 检测高内存应用
     @MainActor
-    private func detectHighMemoryApps() {
+    private func detectHighMemoryApps() -> Bool {
         highMemoryApps.removeAll()
-        
-        // 使用 ps 命令获取所有进程的内存使用情况
-        let task = Process()
-        task.launchPath = "/bin/bash"
-        task.arguments = ["-c", "ps -Aceo pid,rss,comm | awk '$2 > 500000 {print $1,$2,$3}'"]
-        
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        try? task.run()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        
-        if let output = String(data: data, encoding: .utf8) {
-            let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
-            
-            for line in lines {
-                let parts = line.trimmingCharacters(in: .whitespaces).components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-                if parts.count >= 2, let pid = Int32(parts[0]), let rss = Double(parts[1]) {
-                    // 获取应用信息
-                    if let app = NSRunningApplication(processIdentifier: pid) {
-                        // 排除当前应用
-                        if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { continue }
-                        
-                        // 排除系统关键应用
-                        if let bundleId = app.bundleIdentifier {
-                            let systemApps = ["com.apple.finder", "com.apple.dock", "com.apple.SystemUIServer", "com.apple.WindowServer"]
-                            if systemApps.contains(bundleId) { continue }
-                        }
-                        
-                        // 只显示有图标的 GUI 应用
-                        if let icon = app.icon, let name = app.localizedName {
-                            let memoryMB = rss / 1024.0
-                            let memoryGB = memoryMB / 1024.0
-                            highMemoryApps.append(OptimizerProcessItem(
-                                id: pid,
-                                name: name,
-                                icon: icon,
-                                usageDescription: memoryGB >= 1.0 ? String(format: "%.1f GB", memoryGB) : String(format: "%.0f MB", memoryMB)
-                            ))
-                        }
-                    }
-                }
-            }
+        let result = runCheckedMaintenanceCommand("/bin/ps", ["-axo", "pid=,rss="])
+        guard result.success else {
+            taskMessages[.memoryOptimize] = LocalizationManager.shared.text("无法读取应用内存：", "Cannot read application memory: ") + result.output
+            return false
         }
-        
-        // 按内存使用量排序
-        highMemoryApps.sort { app1, app2 in
-            // 提取内存值进行比较
-            let getValue: (String) -> Double = { usage in
-                let components = usage.components(separatedBy: .whitespaces)
-                if let value = Double(components[0]) {
-                    return components.last?.contains("GB") == true ? value * 1024 : value
-                }
-                return 0
-            }
-            return getValue(app1.usageDescription) > getValue(app2.usageDescription)
+        var candidates: [(app: NSRunningApplication, rss: Double)] = []
+        for line in result.output.components(separatedBy: .newlines) {
+            let parts = line.split(whereSeparator: { $0.isWhitespace })
+            guard parts.count == 2, let pid = Int32(parts[0]), let rss = Double(parts[1]), rss > 500_000,
+                  let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular,
+                  pid != ProcessInfo.processInfo.processIdentifier,
+                  let bundleID = app.bundleIdentifier, bundleID != "com.apple.finder",
+                  app.icon != nil, app.localizedName != nil else { continue }
+            candidates.append((app, rss))
         }
+        highMemoryApps = candidates.sorted { $0.rss > $1.rss }.compactMap { candidate in
+            guard let name = candidate.app.localizedName, let icon = candidate.app.icon else { return nil }
+            return OptimizerProcessItem(id: candidate.app.processIdentifier, name: name, icon: icon,
+                usageDescription: ByteCountFormatter.string(fromByteCount: Int64(candidate.rss * 1024), countStyle: .memory),
+                bundleIdentifier: candidate.app.bundleIdentifier)
+        }
+        return true
     }
-    
-    // 终止选中的高内存应用
-    func terminateSelectedMemoryApps() async {
-        let itemsToKill = await MainActor.run { highMemoryApps.filter { $0.isSelected } }
-        for item in itemsToKill {
-            if let app = NSRunningApplication(processIdentifier: item.id) {
-                app.terminate()
-                // 等待一小段时间
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                // 如果还没关闭，强制关闭
-                if app.isTerminated == false {
-                    app.forceTerminate()
-                }
-            }
-        }
-        
-        await MainActor.run {
-            highMemoryApps.removeAll()
-            showMemoryConfirmAlert = false
-            memoryAlertIgnored = false
-        }
-    }
-    
+
     // MARK: - 应用加速
-    private func performAppAcceleration() async {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let fileManager = FileManager.default
-        
-        // 1. 清理应用缓存 (仅清理大于 100MB 的缓存)
-        let cachesPath = home.appendingPathComponent("Library/Caches")
-        if let contents = try? fileManager.contentsOfDirectory(at: cachesPath, includingPropertiesForKeys: [.fileSizeKey]) {
-            for item in contents {
-                // 跳过系统关键缓存
-                if item.lastPathComponent.hasPrefix("com.apple.") { continue }
-                
-                // 仅清理超过 100MB 的缓存
-                if let size = try? item.resourceValues(forKeys: [.totalFileSizeKey]).totalFileSize, size > 100_000_000 {
-                    // Safety Check
-                    if SafetyGuard.shared.isSafeToDelete(item) {
-                        try? fileManager.removeItem(at: item)
-                    }
-                }
-            }
+    private func performAppAcceleration() async -> Bool {
+        let loc = LocalizationManager.shared
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches")
+        let cleaner = MaintenanceFileCleaner(isOwnerRunning: { owner in
+            NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == owner }
+        })
+        let result = cleaner.clean(root: root, kind: .cache, isCancelled: { self.executionWasCancelled || Task.isCancelled })
+        await MainActor.run {
+            taskMessages[.appAccelerate] = loc.text("已将 \(result.movedCount) 个旧缓存文件移到废纸篓；清空后才会释放磁盘空间。", "Moved \(result.movedCount) old cache files to Trash; empty it later to release disk space.")
+            if !result.failures.isEmpty { taskMessages[.appAccelerate, default: ""] += "\n" + result.failures.joined(separator: "\n") }
         }
-        
-        // 2. 清理 Safari 图标缓存
-        let safariIconCache = home.appendingPathComponent("Library/Safari/Touch Icons Cache")
-        try? fileManager.removeItem(at: safariIconCache)
-        
-        // 3. 重建 Launch Services 数据库
-        let lsregister = Process()
-        lsregister.executableURL = URL(fileURLWithPath: "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister")
-        lsregister.arguments = ["-kill", "-r", "-domain", "local", "-domain", "user"]
-        try? lsregister.run()
-        lsregister.waitUntilExit()
-        
-        // 4. 清理 Spotlight 元数据缓存
-        let spotlightCache = home.appendingPathComponent("Library/Caches/com.apple.Spotlight")
-        try? fileManager.removeItem(at: spotlightCache)
-        
-        print("[AppAccelerate] App caches cleaned, Launch Services rebuilt")
+        return result.failures.isEmpty && !result.cancelled
     }
-    
+
     func toggleSelection(for id: Any) {
         // Helper to toggle (kept for compatibility)
     }
@@ -1492,8 +1428,7 @@ struct MemoryConfirmationDialog: View {
                 Spacer()
                 
                 Button(action: {
-                    service.memoryAlertIgnored = true
-                    service.showMemoryConfirmAlert = false
+                    service.cancelMemoryApplications()
                     dismiss()
                 }) {
                     Image(systemName: "xmark.circle.fill")
@@ -1595,8 +1530,7 @@ struct MemoryConfirmationDialog: View {
                 
                 // Ignore Button
                 Button(action: {
-                    service.memoryAlertIgnored = true
-                    service.showMemoryConfirmAlert = false
+                    service.cancelMemoryApplications()
                     dismiss()
                 }) {
                     Text(loc.text("忽略", "Ignore"))
@@ -1611,10 +1545,8 @@ struct MemoryConfirmationDialog: View {
                 
                 // Close Apps Button
                 Button(action: {
-                    Task {
-                        await service.terminateSelectedMemoryApps()
-                        dismiss()
-                    }
+                    service.confirmMemoryApplications()
+                    dismiss()
                 }) {
                     Text(loc.text("关闭应用", "Close Apps"))
                         .font(.system(size: 13, weight: .medium))

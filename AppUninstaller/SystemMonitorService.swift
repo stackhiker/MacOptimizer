@@ -316,98 +316,21 @@ class SystemMonitorService: ObservableObject {
             DispatchQueue.main.async { self.cpuUsage = usage }
         }
 
-        // Memory Usage
-        // Uses `vm_stat`
-        let memTask = Process()
-        memTask.launchPath = "/usr/bin/vm_stat"
-        
-        let memPipe = Pipe()
-        memTask.standardOutput = memPipe
-        
-        do {
-            try memTask.run()
-            let data = memPipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let lines = output.components(separatedBy: "\n")
-                var pageSize: UInt64 = 16384 // Apple Silicon default
-                var pagesActive: UInt64 = 0
-                var pagesInactive: UInt64 = 0
-                var pagesSpeculative: UInt64 = 0
-                var pagesWired: UInt64 = 0
-                var pagesCompressed: UInt64 = 0 // Pages occupied by compressor
-                
-                for line in lines {
-                    if line.contains("page size of") {
-                        // Format: "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
-                        if let match = line.range(of: "\\d+", options: .regularExpression) {
-                            if let size = UInt64(line[match]) {
-                                pageSize = size
-                            }
-                        }
-                    } else if line.hasPrefix("Pages active:") {
-                        pagesActive = extractPageCount(line)
-                    } else if line.hasPrefix("Pages inactive:") {
-                        pagesInactive = extractPageCount(line)
-                    } else if line.hasPrefix("Pages speculative:") {
-                        pagesSpeculative = extractPageCount(line)
-                    } else if line.hasPrefix("Pages wired down:") {
-                        pagesWired = extractPageCount(line)
-                    } else if line.hasPrefix("Pages occupied by compressor:") {
-                        pagesCompressed = extractPageCount(line)
-                    }
-                }
-                
-                let totalRAM = ProcessInfo.processInfo.physicalMemory
-                
-                // Activity Monitor "App Memory" ≈ Anonymous pages = Active + Inactive - Purgeable (approx)
-                // "Used Memory" ≈ App + Wired + Compressed
-                // More accurate: used = total - free - (purgeable is part of inactive)
-                // Let's match Activity Monitor's "Used Memory" more closely:
-                // Used = (Pages Active + Inactive + Speculative + Wired + Compressor) - Purgeable
-                // Or simpler: Used = Total - Free - Purgeable (cached that can be freed)
-                
-                let usedPages = pagesActive + pagesWired + pagesCompressed + pagesSpeculative
-                let usedRAM = usedPages * pageSize
-                
-                // For breakdown: App Memory ≈ Active + Inactive (anonymous portion) - hard to get exact
-                // Let's use: App = Active, Wired = Wired, Compressed = Compressor pages
-                // This is simpler and somewhat matches. For exact match, would need more complex parsing.
-                
-                // Refined: Activity Monitor shows:
-                // App Memory = internal (anonymous) pages = Active + Inactive that are anonymous
-                // Wired = wired
-                // Compressed = compressor occupied
-                // Since we can't easily separate anonymous vs file-backed in inactive, let's use:
-                // App = Active + (Inactive - Pages Purgeable) roughly
-                // But for simplicity in UI matching, let's just use direct values for now.
-                
-                let memoryUsageValue = Double(usedRAM) / Double(totalRAM)
-                let memoryUsedStringValue = ByteCountFormatter.string(fromByteCount: Int64(usedRAM), countStyle: .memory)
-                let memoryTotalStringValue = ByteCountFormatter.string(fromByteCount: Int64(totalRAM), countStyle: .memory)
-                
-                // Batch memory updates
-                Task {
-                    await self.uiUpdater.batch {
-                        self.memoryUsage = memoryUsageValue
-                        self.memoryUsedString = memoryUsedStringValue
-                        self.memoryTotalString = memoryTotalStringValue
-                    }
-                }
-                
-                // For detailed breakdown, use raw page counts
-                self.updateDetailedStats(
-                    pagesActive: pagesActive + pagesInactive + pagesSpeculative,
-                    pagesWired: pagesWired,
-                    pagesCompressed: pagesCompressed,
-                    pageSize: pageSize,
-                    totalRAM: totalRAM,
-                    includePressureAndSwap: shouldRefreshApplications
-                )
+        if let snapshot = MemorySnapshot.read() {
+            DispatchQueue.main.async {
+                self.memoryUsage = snapshot.usage
+                self.memoryUsedString = ByteCountFormatter.string(fromByteCount: Int64(snapshot.usedBytes), countStyle: .memory)
+                self.memoryTotalString = ByteCountFormatter.string(fromByteCount: Int64(snapshot.totalBytes), countStyle: .memory)
+                let total = Double(max(1, snapshot.totalBytes))
+                self.memoryApp = Double(snapshot.appBytes) / total
+                self.memoryWired = Double(snapshot.wiredBytes) / total
+                self.memoryCompressed = Double(snapshot.compressedBytes) / total
+                self.memoryPressureLevel = snapshot.pressure
+                self.memorySwapUsed = snapshot.swapUsedBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) } ?? "—"
+                self.systemUptime = ProcessInfo.processInfo.systemUptime
             }
-        } catch {
-            print("Memory Scan Error: \(error)")
         }
-        
+
         if shouldRefreshBatteryDetails {
             updateBatteryDetails()
         }
@@ -577,6 +500,13 @@ class SystemMonitorService: ObservableObject {
             return  // 暂停期间不检测
         }
         
+        guard MemorySnapshot.readPressure().isElevated else {
+            DispatchQueue.main.async {
+                self.highMemoryApp = nil
+                self.showHighMemoryAlert = false
+            }
+            return
+        }
         // Use ps to get pid and rss
         let task = Process()
         task.launchPath = "/bin/bash"
@@ -602,6 +532,9 @@ class SystemMonitorService: ObservableObject {
                         if let pid = pid_t(parts[0]),
                            let rssKB = Double(parts[1]) {
                             
+                            guard let runningApp = NSRunningApplication(processIdentifier: pid),
+                                  runningApp.activationPolicy == .regular,
+                                  runningApp.bundleIdentifier != "com.apple.finder" else { continue }
                             // Check ignore list and self
                             if pid == ProcessInfo.processInfo.processIdentifier { continue }
                             if ignoredPids.contains(pid) { continue }
@@ -629,24 +562,13 @@ class SystemMonitorService: ObservableObject {
                     }
                 }
                 
-                if maxRSS > 0 {
-                    // Batch high memory app update
-                    Task {
-                        await self.uiUpdater.batch { [weak self] in
-                            guard let self = self else { return }
-                            // Only update if it's a new alert or different app
-                            if self.highMemoryApp?.id != maxPID {
-                                var appIcon: NSImage?
-                                
-                                if let app = NSRunningApplication(processIdentifier: maxPID) {
-                                    appIcon = app.icon
-                                }
-                                
-                                self.highMemoryApp = HighMemoryApp(id: maxPID, name: maxName, usage: maxRSS, icon: appIcon)
-                                self.showHighMemoryAlert = true
-                            }
-                        }
-                    }
+                let alert: HighMemoryApp? = maxRSS > 0
+                    ? HighMemoryApp(id: maxPID, name: maxName, usage: maxRSS,
+                                    icon: NSRunningApplication(processIdentifier: maxPID)?.icon)
+                    : nil
+                DispatchQueue.main.async {
+                    self.highMemoryApp = alert
+                    self.showHighMemoryAlert = alert != nil
                 }
             }
         } catch {
@@ -720,174 +642,32 @@ class SystemMonitorService: ObservableObject {
         saveIgnoredApps()
     }
     
+    @MainActor
     func terminateHighMemoryApp() {
-        if let app = highMemoryApp,
-           let runningApp = NSRunningApplication(processIdentifier: app.id) {
-            runningApp.terminate()
-            // Force kill if needed? Start with terminate.
-            
-            // Add to ignore list so we don't alert again immediately if it takes time to close
-            ignoredPids.insert(app.id)
-            
-            Task {
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-                
-                // Batch alert dismissal
-                await uiUpdater.batch {
-                    self.highMemoryApp = nil
-                    self.showHighMemoryAlert = false
-                }
-            }
-        } else if let app = highMemoryApp {
-             // Fallback for non-app processes? kill command
-             let killTask = Process()
-             killTask.launchPath = "/bin/kill"
-             killTask.arguments = ["\(app.id)"]
-             try? killTask.run()
-             
-             ignoredPids.insert(app.id)
-             
-             Task {
-                 await uiUpdater.batch {
-                     self.highMemoryApp = nil
-                     self.showHighMemoryAlert = false
-                 }
-             }
+        guard let item = highMemoryApp,
+              let app = NSRunningApplication(processIdentifier: item.id),
+              app.activationPolicy == .regular,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              app.localizedName == item.name else { return }
+        // A normal quit request lets the application present a save dialog.
+        // Dismiss this suggestion only if the request was accepted.
+        if app.terminate() {
+            highMemoryApp = nil
+            showHighMemoryAlert = false
+            snoozedUntil = Date().addingTimeInterval(60)
         }
     }
-    
-    // Detailed Stats
+
     @Published var systemUptime: TimeInterval = 0
     @Published var memoryApp: Double = 0
     @Published var memoryWired: Double = 0
     @Published var memoryCompressed: Double = 0
-    @Published var memoryPressure: Double = 0.0 // Percentage
+    @Published var memoryPressureLevel: MemoryPressureLevel = .unknown
     @Published var memorySwapUsed: String = "0 B"
     @Published var memorySwapTotal: String = "0 B"
     @Published var batteryHealth: String = "—"
     @Published var batteryCycleCount: Int = 0
     @Published var batteryCondition: String = "—"
-    
-    // ... existing extractPageCount ...
-    private func extractPageCount(_ line: String) -> UInt64 {
-        let parts = line.components(separatedBy: ":")
-        if parts.count == 2 {
-            let numberPart = parts[1].replacingOccurrences(of: ".", with: "").trimmingCharacters(in: .whitespaces)
-            return UInt64(numberPart) ?? 0
-        }
-        return 0
-    }
-    
-    // Add logic to updateStats
-    private func updateDetailedStats(
-        pagesActive: UInt64,
-        pagesWired: UInt64,
-        pagesCompressed: UInt64,
-        pageSize: UInt64,
-        totalRAM: UInt64,
-        includePressureAndSwap: Bool
-    ) {
-        let memoryAppValue = Double(pagesActive * pageSize) / Double(totalRAM)
-        let memoryWiredValue = Double(pagesWired * pageSize) / Double(totalRAM)
-        let memoryCompressedValue = Double(pagesCompressed * pageSize) / Double(totalRAM)
-        
-        // Uptime
-        var boottime = timeval()
-        var size = MemoryLayout<timeval>.stride
-        var systemUptimeValue: TimeInterval = 0
-        if sysctlbyname("kern.boottime", &boottime, &size, nil, 0) == 0 {
-            let bootDate = Date(timeIntervalSince1970: Double(boottime.tv_sec) + Double(boottime.tv_usec) / 1_000_000.0)
-            systemUptimeValue = Date().timeIntervalSince(bootDate)
-        }
-        
-        // Batch detailed stats update
-        Task {
-            await self.uiUpdater.batch {
-                self.memoryApp = memoryAppValue
-                self.memoryWired = memoryWiredValue
-                self.memoryCompressed = memoryCompressedValue
-                self.systemUptime = systemUptimeValue
-            }
-        }
-        
-        if includePressureAndSwap {
-            updateMemoryPressureAndSwap()
-        }
-    }
-    
-    private func updateMemoryPressureAndSwap() {
-        // Memory Pressure
-        let pressureTask = Process()
-        pressureTask.launchPath = "/usr/bin/memory_pressure"
-        pressureTask.arguments = ["-Q"]
-        
-        let pressurePipe = Pipe()
-        pressureTask.standardOutput = pressurePipe
-        
-        DispatchQueue.global(qos: .background).async {
-            do {
-                try pressureTask.run()
-                let data = pressurePipe.fileHandleForReading.readDataToEndOfFile()
-                if let output = String(data: data, encoding: .utf8) {
-                    // Output: "System-wide memory free percentage: 48%"
-                    if let range = output.range(of: "\\d+%", options: .regularExpression) {
-                        let percentString = String(output[range]).dropLast()
-                        if let freePercent = Double(percentString) {
-                            let memoryPressureValue = (100.0 - freePercent) / 100.0
-                            
-                            // Batch pressure update
-                            Task {
-                                await self.uiUpdater.batch {
-                                    self.memoryPressure = memoryPressureValue
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch {
-                print("Memory Pressure Error: \(error)")
-            }
-        }
-        
-        // Swap Usage
-        // sysctl vm.swapusage
-        let swapTask = Process()
-        swapTask.launchPath = "/usr/sbin/sysctl"
-        swapTask.arguments = ["vm.swapusage"]
-        
-        let swapPipe = Pipe()
-        swapTask.standardOutput = swapPipe
-        
-        DispatchQueue.global(qos: .background).async {
-            do {
-                try swapTask.run()
-                let data = swapPipe.fileHandleForReading.readDataToEndOfFile()
-                if let output = String(data: data, encoding: .utf8) {
-                    // vm.swapusage: total = 5120.00M  used = 4426.56M  free = 693.44M  (encrypted)
-                    let components = output.components(separatedBy: " ")
-                    var usedStr = ""
-                    
-                    for (index, comp) in components.enumerated() {
-                        if comp == "used" && index + 2 < components.count {
-                             // index+1 is "=", index+2 is value
-                             usedStr = components[index + 2]
-                        }
-                    }
-                    
-                    // Batch swap update
-                    if !usedStr.isEmpty {
-                        Task {
-                            await self.uiUpdater.batch {
-                                self.memorySwapUsed = usedStr
-                            }
-                        }
-                    }
-                }
-            } catch {
-                print("Swap Usage Error: \(error)")
-            }
-        }
-    }
     
     private func updateBatteryDetails() {
          let task = Process()

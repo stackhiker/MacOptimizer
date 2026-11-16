@@ -343,7 +343,7 @@ struct MaintenanceReplicaView: View {
 
             Text(service.completedTasks.isEmpty
                  ? localized("查看任务日志以了解失败原因。", "Review the task log for failure details.")
-                 : localized("您的 Mac 现在运行起来应该更加顺畅。", "Your Mac should now run more smoothly."))
+                 : localized("请查看各项操作的实际结果。", "Review the actual results of each task."))
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.64))
 
@@ -357,20 +357,27 @@ struct MaintenanceReplicaView: View {
                                     .font(.system(size: 11.5, weight: .semibold))
                                     .foregroundColor(.white.opacity(0.84))
                                 Text(result.message)
-                                    .font(.system(size: 9.5))
-                                    .foregroundColor(.white.opacity(0.50))
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.white.opacity(0.70))
+                                if let details = result.details {
+                                    Text(details)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.white.opacity(0.55))
+                                        .textSelection(.enabled)
+                                }
                             }
                             Spacer()
                             Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                                 .foregroundColor(result.success ? .cyan : .orange)
                         }
                         .padding(.horizontal, 12)
-                        .frame(height: 47)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.black.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
             }
-            .frame(width: 430, height: min(CGFloat(service.taskResults.count) * 53, 190))
+            .frame(width: 480, height: min(CGFloat(service.taskResults.count) * 100, 260))
 
             Spacer()
 

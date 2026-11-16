@@ -85,57 +85,9 @@ actor ScanProgressTracker {
 
 /// 并发计算目录大小（优化版）
 func calculateSizeAsync(at url: URL, fileManager: FileManager = .default) async -> Int64 {
-    var totalSize: Int64 = 0
-    
-    var isDirectory: ObjCBool = false
-    guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return 0 }
-    
-    if isDirectory.boolValue {
-        // 对于目录，使用并发枚举
-        guard let enumerator = fileManager.enumerator(
-            at: url,
-            includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else { return 0 }
-        
-        // 批量收集文件 URL，减少锁竞争
-        var fileURLs: [URL] = []
-        while let fileURL = enumerator.nextObject() as? URL {
-            fileURLs.append(fileURL)
-        }
-        
-        // 并发计算大小
-        let chunkSize = max(100, fileURLs.count / 8) // 分成最多 8 个任务
-        let chunks = stride(from: 0, to: fileURLs.count, by: chunkSize).map {
-            Array(fileURLs[$0..<min($0 + chunkSize, fileURLs.count)])
-        }
-        
-        await withTaskGroup(of: Int64.self) { group in
-            for chunk in chunks {
-                group.addTask {
-                    var chunkSize: Int64 = 0
-                    for fileURL in chunk {
-                        if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                            chunkSize += Int64(size)
-                        }
-                    }
-                    return chunkSize
-                }
-            }
-            
-            for await size in group {
-                totalSize += size
-            }
-        }
-    } else {
-        // 单个文件直接获取大小
-        if let attributes = try? fileManager.attributesOfItem(atPath: url.path),
-           let size = attributes[.size] as? UInt64 {
-            totalSize = Int64(size)
-        }
-    }
-    
-    return totalSize
+    // Stream one file at a time instead of retaining every URL and a second set
+    // of chunk arrays. Directory traversal must stop with its owning scan.
+    CleanupFileSystem.logicalSize(at: url, shouldCancel: { Task.isCancelled })
 }
 
 /// 快速估算目录大小（采样法，速度更快但不精确）
@@ -151,6 +103,7 @@ func estimateDirectorySize(at url: URL, sampleRate: Double = 0.1, fileManager: F
     var totalCount = 0
     
     while let fileURL = enumerator.nextObject() as? URL {
+        if Task.isCancelled { break }
         totalCount += 1
         
         // 按采样率采样
@@ -209,65 +162,57 @@ func scanDirectoryConcurrently<T: Sendable>(
     configuration: ScanConfiguration = .default,
     transform: @escaping @Sendable (URL, URLResourceValues) async -> T?
 ) async -> [T] {
-    let collector = ScanResultCollector<T>()
     let fileManager = FileManager.default
-    
-    await withTaskGroup(of: [T].self) { group in
-        for directory in directories {
-            group.addTask {
-                var items: [T] = []
-                
-                guard fileManager.fileExists(atPath: directory.path) else { return items }
-                
-                let options: FileManager.DirectoryEnumerationOptions = configuration.skipHiddenFiles 
-                    ? [.skipsHiddenFiles] 
-                    : []
-                
-                guard let enumerator = fileManager.enumerator(
-                    at: directory,
-                    includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .contentModificationDateKey],
-                    options: options
-                ) else { return items }
-                
-                while let fileURL = enumerator.nextObject() as? URL {
-                    // 检查是否在排除列表中
-                    let relativePath = fileURL.path.replacingOccurrences(of: directory.path, with: "")
-                    let shouldExclude = configuration.excludedPaths.contains { 
-                        relativePath.hasPrefix("/\($0)") || relativePath.hasPrefix($0)
-                    }
-                    
-                    if shouldExclude {
-                        enumerator.skipDescendants()
-                        continue
-                    }
-                    
-                    guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey, .contentModificationDateKey]) else {
-                        continue
-                    }
-                    
-                    // 跳过目录
-                    if values.isDirectory == true { continue }
-                    
-                    // 大小过滤
-                    let size = Int64(values.fileSize ?? 0)
-                    if size < configuration.minFileSize { continue }
-                    
-                    // 转换
-                    if let item = await transform(fileURL, values) {
-                        items.append(item)
-                    }
-                }
-                
-                return items
+    let roots = CleanupFileSystem.uniqueRoots(directories)
+    let limit = max(1, configuration.maxConcurrency)
+    let keys: [URLResourceKey] = [.fileSizeKey, .isDirectoryKey, .isRegularFileKey,
+                                 .isSymbolicLinkKey, .contentModificationDateKey]
+
+    func scanDirectory(_ directory: URL) async -> [T] {
+        guard !Task.isCancelled,
+              (try? directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { return [] }
+        var items: [T] = []
+        var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
+        if configuration.skipHiddenFiles { options.insert(.skipsHiddenFiles) }
+        guard let enumerator = fileManager.enumerator(at: directory,
+            includingPropertiesForKeys: keys, options: options) else { return [] }
+        let rootPath = directory.standardizedFileURL.path
+        while let fileURL = enumerator.nextObject() as? URL {
+            if Task.isCancelled { break }
+            let path = fileURL.standardizedFileURL.path
+            let relativePath = String(path.dropFirst(rootPath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let excluded = configuration.excludedPaths.contains {
+                relativePath == $0 || relativePath.hasPrefix($0 + "/")
+            }
+            if excluded { enumerator.skipDescendants(); continue }
+            guard let values = try? fileURL.resourceValues(forKeys: Set(keys)) else { continue }
+            if values.isSymbolicLink == true { enumerator.skipDescendants(); continue }
+            guard values.isRegularFile == true,
+                  Int64(values.fileSize ?? 0) >= configuration.minFileSize else { continue }
+            if let item = await transform(fileURL, values) { items.append(item) }
+        }
+        return items
+    }
+
+    return await withTaskGroup(of: [T].self) { group in
+        var nextIndex = 0
+        var results: [T] = []
+        for _ in 0..<min(limit, roots.count) {
+            let root = roots[nextIndex]
+            nextIndex += 1
+            group.addTask { await scanDirectory(root) }
+        }
+        while let items = await group.next() {
+            if Task.isCancelled { group.cancelAll(); break }
+            results.append(contentsOf: items)
+            if nextIndex < roots.count {
+                let root = roots[nextIndex]
+                nextIndex += 1
+                group.addTask { await scanDirectory(root) }
             }
         }
-        
-        for await items in group {
-            await collector.appendContents(of: items)
-        }
+        return results
     }
-    
-    return await collector.getResults()
 }
 
 // MARK: - 批量 UI 更新管理器
