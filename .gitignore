@@ -27,3 +27,9 @@ dist/
 Packages/
 .strict-localization-cache.json
 .wavespeed-localization-cache.json
+
+# Python build helper caches
+__pycache__/
+
+# Native build-script validation logs
+/Validation/BuildScripts/

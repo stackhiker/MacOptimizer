@@ -111,8 +111,8 @@ MacOptimizer is a system optimization tool designed specifically for macOS, feat
 
 ### System Requirements
 - **macOS 13.0 (Ventura)** or later
-- **Apple Silicon (M1/M2/M3/M4)** or Intel (modify build parameters)
-- **Command Line Tools** (Full Xcode not required)
+- **Apple Silicon (M1/M2/M3/M4)** or Intel
+- **Command Line Tools** and **Python 3** (Full Xcode not required)
 
 
 ### Download DMG
@@ -122,27 +122,33 @@ Download the latest release from [GitHub Releases](https://github.com/ddlmanus/M
 - **Intel**: `MacOptimizer_vX.X.X_Intel.dmg`
 
 ### Build from Source
-# 1. Clone repository
-git clone https://github.com/ddlmanus/MacOptimizer.git
-cd MacOptimizer
-
-# 2. Run build script
-chmod +x build.sh
-./build.sh
-
-# 3. Launch app
-open build/Mac优化大师.app
-```
-
-### Intel Support
-
-For Intel Mac, modify `build.sh`:
 
 ```bash
-# Change
--target arm64-apple-macos13.0
-# To
--target x86_64-apple-macos13.0
+git clone https://github.com/stackhiker/MacOptimizer.git
+cd MacOptimizer
+
+# Build and verify the Apple Silicon App and DMG.
+./build.sh
+open build/Mac优化大师.app
+
+# Build, verify, install to /Applications, and launch.
+./build.sh --install
+
+# Intel build, or package both architectures.
+./build.sh --arch x86_64
+./release_package.sh
+```
+
+The scripts can be called from any working directory. Single-architecture output stays in `build/`; dual-architecture output stays in `build_release/`. Use `--install-dir "$HOME/Applications"` with `--install` for a user-local installation. For a dual-architecture package, installation selects the current Mac's architecture; a single-architecture installation must match this Mac.
+
+Each run uses a private temporary directory and compiler module cache, removed on normal success or failure. A shared packaging lock rejects overlapping builds. Existing successful outputs are replaced only after compilation, signature, architecture, and DMG checks pass; installation additionally verifies the installed bundle and launch, with rollback on failure.
+
+Successful runs retain the current App/DMG set. Successful installation retains at most one rollback archive at `backups/previous-install.zip` in the output directory. Only recognized historical packages or artifacts recorded by the build manifest are retired. Historical rollback ZIPs are removed only when a verified replacement archive exists. Source files, unknown files, shared `.build` validation data, and unrelated temporary directories are preserved. If recovery itself fails, the script reports and retains a recovery directory instead of deleting the previous outputs.
+
+Run the build-script regression checks with:
+
+```bash
+python3 -B -m unittest discover -s Tests/BuildScripts -v
 ```
 
 ---
@@ -357,28 +363,33 @@ brew install --cask ./homebrew/macoptimizer.rb
 ### 从源码编译
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/ddlmanus/MacOptimizer.git
+git clone https://github.com/stackhiker/MacOptimizer.git
 cd MacOptimizer
 
-# 2. 运行构建脚本
-chmod +x build.sh
+# 构建并校验 Apple Silicon App 和 DMG
 ./build.sh
-
-# 3. 启动应用
 open build/Mac优化大师.app
+
+# 构建、校验、覆盖安装到 /Applications 并启动
+./build.sh --install
+
+# 构建 Intel 版本，或打包双架构版本
+./build.sh --arch x86_64
+./release_package.sh
 ```
 
-### Intel 芯片支持
+脚本支持从任意工作目录调用。单架构产物位于 `build/`，双架构产物位于 `build_release/`。使用 `--install --install-dir "$HOME/Applications"` 可安装到个人应用目录；双架构安装时选择本机对应的架构；单架构安装必须与本机匹配。
 
-如需在 Intel Mac 上编译，请修改 `build.sh` 中的编译参数：
+每轮使用独立临时目录和编译模块缓存，正常成功或失败退出时均清理本轮临时文件；同一仓库的并行构建会被拒绝。编译、签名、架构和 DMG 校验全部通过后才更新成品；安装模式还会校验已安装应用并确认启动，失败时恢复旧版本。
+
+成功后只保留当前 App/DMG 产物。安装成功后最多保留一份回滚包，位于输出目录的 `backups/previous-install.zip`。自动清理仅处理构建清单记录的旧产物及可核验的历史安装包；旧回滚 ZIP 只有在存在有效替代回滚包时才清理。源码、未知文件、共享 `.build` 验证数据和其他临时目录会保留。若恢复过程本身受阻，会保留恢复目录并提示其路径。
+
+构建脚本的回归检查：
 
 ```bash
-# 将
--target arm64-apple-macos13.0
-# 改为
--target x86_64-apple-macos13.0
+python3 -B -m unittest discover -s Tests/BuildScripts -v
 ```
+
 如果觉得对你有帮助，可以点个 star 哦  开发不易，你的支持就是我最大的动力
 
 ---
