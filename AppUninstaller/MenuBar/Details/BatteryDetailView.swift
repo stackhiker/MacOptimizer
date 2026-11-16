@@ -38,10 +38,10 @@ struct BatteryDetailView: View {
                         }
                         
                         VStack(spacing: 2) {
-                            Text("\(Int(systemMonitor.batteryLevel * 100))%")
+                            Text(systemMonitor.batteryDataAvailable ? "\(Int(systemMonitor.batteryLevel * 100))%" : "—")
                                 .font(.system(size: 48, weight: .bold))
                                 .foregroundColor(.white)
-                            Text(systemMonitor.isCharging ? loc.text("正在充电", "Charging") : loc.text("剩余电量", "Charge Remaining"))
+                            Text(systemMonitor.batteryState)
                                 .font(.system(size: 12))
                                 .foregroundColor(.white.opacity(0.6))
                         }
@@ -52,13 +52,13 @@ struct BatteryDetailView: View {
                     // Info Grid
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
                         BatteryInfoCard(title: loc.text("健康度", "Health"), value: systemMonitor.batteryHealth, icon: "heart.fill", color: .green)
-                        BatteryInfoCard(title: loc.text("循环次数", "Cycle Count"), value: "\(systemMonitor.batteryCycleCount)", icon: "repeat", color: .blue)
+                        BatteryInfoCard(title: loc.text("循环次数", "Cycle Count"), value: systemMonitor.batteryCycleCount >= 0 ? "\(systemMonitor.batteryCycleCount)" : "—", icon: "repeat", color: .blue)
                         BatteryInfoCard(title: loc.text("状态", "Condition"), value: systemMonitor.batteryCondition, icon: "battery.100", color: .orange)
-                        BatteryInfoCard(title: loc.text("温度", "Temperature"), value: "32°C", icon: "thermometer", color: .red) // Mock temp for now
+                        BatteryInfoCard(title: loc.text("温度", "Temperature"), value: "—", icon: "thermometer", color: .red)
                     }
                     .padding(.horizontal, 20)
                     
-                    if systemMonitor.isCharging {
+                    if systemMonitor.isPowerConnected {
                         HStack {
                             Image(systemName: "bolt.fill")
                                 .foregroundColor(.yellow)

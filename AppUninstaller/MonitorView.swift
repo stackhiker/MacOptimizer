@@ -14,6 +14,9 @@ struct MonitorView: View {
         case appManager
         case portManager
         case processManager
+        case tasks
+        case recovery
+        case permissions
 
         case networkOptimize  // 新增：网络优化
         case protection // 新增：安全防护
@@ -36,6 +39,12 @@ struct MonitorView: View {
                         processSortMode: $processSortMode,
                         systemMonitor: systemMonitor
                     )
+                case .tasks:
+                    OperationCenterView()
+                case .recovery:
+                    RecoveryCenterView()
+                case .permissions:
+                    PermissionCoverageView()
                 case .protection:
                     ConsoleProtectionDetailView(viewState: $viewState)
                 case .appManager:
@@ -55,12 +64,21 @@ struct MonitorView: View {
             .background(Color.clear) // Gradient is in main window
         }
         .onAppear {
-            systemMonitor.startMonitoring(client: monitorClientID)
+            updateMonitoring()
         }
+        .onChange(of: viewState) { _ in updateMonitoring() }
         .onDisappear {
             systemMonitor.stopMonitoring(client: monitorClientID)
         }
     }
+    private func updateMonitoring() {
+        switch viewState {
+        case .dashboard: systemMonitor.startMonitoring(client: monitorClientID, scope: .overview)
+        case .networkOptimize: systemMonitor.startMonitoring(client: monitorClientID, scope: .network)
+        default: systemMonitor.stopMonitoring(client: monitorClientID)
+        }
+    }
+
 }
 
 // MARK: - 1. Dashboard Home View

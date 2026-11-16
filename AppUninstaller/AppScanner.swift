@@ -46,6 +46,10 @@ class AppScanner: NSObject, ObservableObject {
     /// Reuse one scanner so its five-minute result cache survives row scans and
     /// module switches instead of being discarded for every application.
     private let residualScanner: ResidualFileScanner
+    @MainActor private var applicationScanTask: Task<Void, Never>?
+    @MainActor private var applicationScanID: UUID?
+    @MainActor private var residualTasks: [UUID: Task<Void, Never>] = [:]
+    @MainActor private var scannedResidualApps: [UUID: Date] = [:]
 
     init(residualScanner: ResidualFileScanner = ResidualFileScanner()) {
         self.residualScanner = residualScanner
@@ -74,18 +78,30 @@ class AppScanner: NSObject, ObservableObject {
     /// - Batch processing prevents memory spikes
     /// - Single MainActor call reduces context switches
     /// - Performance monitoring identifies bottlenecks
+    @MainActor
     func scanApplications() async {
+        if let task = applicationScanTask {
+            await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+            return
+        }
+        let id = UUID()
+        applicationScanID = id
+        let task = Task { await self.performApplicationScan() }
+        applicationScanTask = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        if applicationScanID == id {
+            applicationScanTask = nil
+            applicationScanID = nil
+            isScanning = false
+        }
+    }
+
+    private func performApplicationScan() async {
         let token = performanceMonitor.startMeasuring("scanApplications")
         defer { performanceMonitor.endMeasuring(token) }
         
         await MainActor.run {
             self.isScanning = true
-        }
-        
-        defer {
-            Task { @MainActor in
-                self.isScanning = false
-            }
         }
         
         // Perform all I/O and processing on background thread
@@ -101,6 +117,7 @@ class AppScanner: NSObject, ObservableObject {
             ]
             
             for applicationPath in applicationPaths {
+                guard !Task.isCancelled else { return [] }
                 guard fileManager.fileExists(atPath: applicationPath) else { continue }
                 
                 do {
@@ -112,6 +129,7 @@ class AppScanner: NSObject, ObservableObject {
                     let batchSize = 50
                     for batch in contents.chunked(into: batchSize) {
                         for item in batch {
+                            guard !Task.isCancelled else { return [] }
                             let fullPath = (applicationPath as NSString).appendingPathComponent(item)
                             let url = URL(fileURLWithPath: fullPath)
                             
@@ -136,9 +154,8 @@ class AppScanner: NSObject, ObservableObject {
         // Single MainActor call to update UI
         // This reduces context switches from potentially 100+ to just 1
         // All state changes are applied atomically
-        await uiUpdater.batch {
-            self.apps = scannedApps
-        }
+        guard !Task.isCancelled else { return }
+        await MainActor.run { self.apps = scannedApps }
     }
     
     /// Loads application information from a bundle URL
@@ -213,7 +230,7 @@ class AppScanner: NSObject, ObservableObject {
         
         // Calculate size on background thread
         // This prevents blocking the main thread
-        let size = await Task.detached(priority: .utility) {
+        let task = Task.detached(priority: .utility) {
             
             let fileManager = FileManager.default
             var size: Int64 = 0
@@ -221,6 +238,7 @@ class AppScanner: NSObject, ObservableObject {
             // Enumerate all files in directory recursively
             if let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
                 while let file = enumerator.nextObject() as? URL {
+                    if Task.isCancelled { break }
                     do {
                         let attributes = try file.resourceValues(forKeys: [.fileSizeKey])
                         if let fileSize = attributes.fileSize {
@@ -233,7 +251,9 @@ class AppScanner: NSObject, ObservableObject {
             }
             
             return size
-        }.value
+        }
+        let size = await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        guard !Task.isCancelled else { return 0 }
         
         // Cache the result for 5 minutes (300 seconds)
         // This allows the cache to be reused for repeated operations
@@ -267,6 +287,7 @@ class AppScanner: NSObject, ObservableObject {
     @MainActor
     func applyRemovalResult(_ result: RemovalResult, to app: InstalledApp) {
         residualScanner.invalidateCache(for: app)
+        scannedResidualApps[app.id] = nil
         sizeCache.invalidate(app.path.path)
         let completed = Set(result.completedPaths.map { $0.standardizedFileURL.path })
         app.residualFiles.removeAll { completed.contains($0.path.standardizedFileURL.path) }
@@ -275,14 +296,34 @@ class AppScanner: NSObject, ObservableObject {
         }
     }
     
-    /// Scans for residual files of an application
+    /// Share a single in-flight scan and load only apps requested by the UI.
+    @MainActor
     func scanResidualFiles(for app: InstalledApp) async {
-        let residualFiles = await residualScanner.scanResidualFiles(for: app)
-        
-        await uiUpdater.batch {
-            app.residualFiles = residualFiles
+        if let task = residualTasks[app.id] {
+            await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+            return
         }
+        if let lastScan = scannedResidualApps[app.id], Date().timeIntervalSince(lastScan) < 300 { return }
+        guard !Task.isCancelled else { return }
+        app.isScanning = true
+        let task = Task { @MainActor in
+            let files = await self.residualScanner.scanResidualFiles(for: app)
+            guard !Task.isCancelled else { return }
+            app.residualFiles = files
+            self.scannedResidualApps[app.id] = Date()
+        }
+        residualTasks[app.id] = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        residualTasks[app.id] = nil
+        app.isScanning = false
     }
+
+    @MainActor
+    func cancelScanning() {
+        applicationScanTask?.cancel()
+        for task in residualTasks.values { task.cancel() }
+    }
+
 }
 
 

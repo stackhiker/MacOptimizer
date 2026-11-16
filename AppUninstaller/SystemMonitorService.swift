@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import AppKit
 import CoreWLAN
+import IOKit
 
 struct HighMemoryApp: Identifiable {
     let id: pid_t
@@ -13,7 +14,12 @@ struct HighMemoryApp: Identifiable {
 class SystemMonitorService: ObservableObject {
     static let shared = SystemMonitorService()
     private let metrics = SystemMetricsSampler()
-    private var monitoringClients = Set<String>()
+    enum MonitoringScope { case all, overview, network }
+    private var monitoringClients: [String: MonitoringScope] = [:]
+    private let diskSampler = DiskIOSampler()
+    @Published private(set) var cpuUsageHistory: [Double] = []
+    @Published private(set) var diskReadSpeed: Double?
+    @Published private(set) var diskWriteSpeed: Double?
     @Published var cpuUsage: Double = 0.0
     @Published var memoryUsage: Double = 0.0 // Percentage
     @Published var memoryUsedString: String = "0 GB"
@@ -39,7 +45,9 @@ class SystemMonitorService: ObservableObject {
     
     
     // Battery Monitoring
-    @Published var batteryLevel: Double = 1.0
+    @Published var batteryLevel: Double = 0.0
+    @Published private(set) var batteryDataAvailable = false
+    @Published private(set) var isPowerConnected = false
     @Published var isCharging: Bool = false
     @Published var batteryState: String = "—"
     @Published var batteryTimeRemaining: String = ""
@@ -74,7 +82,7 @@ class SystemMonitorService: ObservableObject {
     
     // WiFi Info
     @Published var wifiSSID: String = "Wi-Fi"
-    @Published var wifiSecurity: String = "WPA2 Personal" // Default/Mock for now
+    @Published var wifiSecurity: String = "—"
     @Published var wifiSignalStrength: String = "—"
     @Published var connectionDuration: String = "—"
     private var connectionStartTime: Date = Date()
@@ -253,10 +261,15 @@ class SystemMonitorService: ObservableObject {
         UserDefaults.standard.set(Array(permanentlyIgnoredApps), forKey: ignoredAppsKey)
     }
     
-    func startMonitoring(client: String = "default") {
-        monitoringClients.insert(client)
-        guard timer == nil else { return }
+    func startMonitoring(client: String = "default", scope: MonitoringScope = .all) {
+        let changedScope = monitoringClients[client] != scope
+        monitoringClients[client] = scope
+        guard timer == nil else {
+            if changedScope { updateCycle = 0; scheduleUpdate() }
+            return
+        }
 
+        updateCycle = 0
         scheduleUpdate()
 
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
@@ -267,7 +280,7 @@ class SystemMonitorService: ObservableObject {
     }
     
     func stopMonitoring(client: String = "default") {
-        monitoringClients.remove(client)
+        monitoringClients[client] = nil
         guard monitoringClients.isEmpty else { return }
         timer?.invalidate()
         timer = nil
@@ -280,9 +293,10 @@ class SystemMonitorService: ObservableObject {
         let cycle = updateCycle
         updateCycle += 1
 
+        let scopes = Array(monitoringClients.values)
         monitorQueue.async { [weak self] in
             guard let self else { return }
-            self.updateStats(cycle: cycle)
+            self.updateStats(cycle: cycle, scopes: scopes)
 
             DispatchQueue.main.async { [weak self] in
                 self?.isUpdateInFlight = false
@@ -303,20 +317,25 @@ class SystemMonitorService: ObservableObject {
         }
     }
     
-    private func updateStats(cycle: Int) {
-        let shouldRefreshApplications = cycle.isMultiple(of: 5)
-        let shouldRefreshBatteryDetails = cycle.isMultiple(of: 30)
+    private func updateStats(cycle: Int, scopes: [MonitoringScope]) {
+        let needsOverview = scopes.contains(.all) || scopes.contains(.overview)
+        let needsBattery = scopes.contains(.all)
+        let shouldRefreshApplications = needsOverview && cycle.isMultiple(of: 5)
+        let shouldRefreshBatteryDetails = needsBattery && cycle.isMultiple(of: 30)
 
         if shouldRefreshApplications {
             checkHighMemoryApps()
             fetchUserProcesses()
         }
         
-        if let usage = metrics.cpuUsage() {
-            DispatchQueue.main.async { self.cpuUsage = usage }
+        if needsOverview, let usage = metrics.cpuUsage() {
+            DispatchQueue.main.async {
+                self.cpuUsage = usage
+                self.cpuUsageHistory = Array((self.cpuUsageHistory + [usage]).suffix(40))
+            }
         }
 
-        if let snapshot = MemorySnapshot.read() {
+        if needsOverview, let snapshot = MemorySnapshot.read() {
             DispatchQueue.main.async {
                 self.memoryUsage = snapshot.usage
                 self.memoryUsedString = ByteCountFormatter.string(fromByteCount: Int64(snapshot.usedBytes), countStyle: .memory)
@@ -331,6 +350,10 @@ class SystemMonitorService: ObservableObject {
             }
         }
 
+        if needsOverview {
+            let rates = diskSampler.read()
+            DispatchQueue.main.async { self.diskReadSpeed = rates?.read; self.diskWriteSpeed = rates?.written }
+        }
         if shouldRefreshBatteryDetails {
             updateBatteryDetails()
         }
@@ -346,9 +369,9 @@ class SystemMonitorService: ObservableObject {
             }
         }
 
-        if shouldRefreshApplications {
+        if cycle.isMultiple(of: 5) {
             fetchWiFiInfo()
-            updateBatteryStatus()
+            if needsBattery { updateBatteryStatus() }
         }
         updateConnectionDuration()
     }
@@ -380,119 +403,40 @@ class SystemMonitorService: ObservableObject {
         }
     }
     
-    private func updateBatteryStatus() {
-        // Use pmset -g batt
-        let task = Process()
-        task.launchPath = "/usr/bin/pmset"
-        task.arguments = ["-g", "batt"]
-        
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                // Example output:
-                // Now drawing from 'AC Power'
-                // -InternalBattery-0 (id=1234567)	98%; charging; 0:10 remaining present: true
-                
-                let lines = output.components(separatedBy: "\n")
-                if lines.count >= 2 {
-                    let statusLine = lines[1]
-                    
-                    // Parse Percentage
-                    var batteryLevelValue: Double = 1.0
-                    var isChargingValue = false
-                    var isActivelyCharging = false
-                    var remainingHours: Int?
-                    var remainingMinutes: Int?
-                    
-                    if let range = statusLine.range(of: "\\d+%", options: .regularExpression) {
-                        let percentString = String(statusLine[range]).dropLast()
-                        if let percent = Double(percentString) {
-                            batteryLevelValue = percent / 100.0
-                        }
-                    }
-                    
-                    // Parse Charging State
-                    if output.contains("AC Power") {
-                        isChargingValue = true
-                        if statusLine.contains("charging") {
-                            isActivelyCharging = true
-                        }
-                    } else {
-                        isChargingValue = false
+    private func readBatteryProperties() -> [String: Any]? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        var properties: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS else { return nil }
+        return properties?.takeRetainedValue() as? [String: Any]
+    }
 
-                        if let range = statusLine.range(of: "\\d+:\\d+ remaining", options: .regularExpression) {
-                            let duration = statusLine[range]
-                                .replacingOccurrences(of: " remaining", with: "")
-                                .split(separator: ":")
-                            if duration.count == 2,
-                               let hours = Int(duration[0]),
-                               let minutes = Int(duration[1]) {
-                                remainingHours = hours
-                                remainingMinutes = minutes
-                            }
-                        }
-                    }
-                    
-                    // Batch battery status update
-                    Task {
-                        await self.uiUpdater.batch {
-                            let loc = LocalizationManager.shared
-                            self.batteryLevel = batteryLevelValue
-                            self.isCharging = isChargingValue
-                            if isChargingValue {
-                                self.batteryState = isActivelyCharging
-                                    ? loc.text(
-                                        simplifiedChinese: "正在充电",
-                                        traditionalChinese: "正在充電",
-                                        english: "Charging",
-                                        japanese: "充電中",
-                                        korean: "충전 중",
-                                        russian: "Заряжается"
-                                    )
-                                    : loc.text(
-                                        simplifiedChinese: "已连接电源",
-                                        traditionalChinese: "已連接電源",
-                                        english: "Power Connected",
-                                        japanese: "電源に接続済み",
-                                        korean: "전원 연결됨",
-                                        russian: "Подключено питание"
-                                    )
-                                self.batteryTimeRemaining = ""
-                            } else {
-                                self.batteryState = loc.text(
-                                    simplifiedChinese: "使用电池",
-                                    traditionalChinese: "使用電池",
-                                    english: "On Battery",
-                                    japanese: "バッテリー使用中",
-                                    korean: "배터리 사용 중",
-                                    russian: "Питание от аккумулятора"
-                                )
-                                if let hours = remainingHours, let minutes = remainingMinutes {
-                                    self.batteryTimeRemaining = loc.text(
-                                        simplifiedChinese: "剩余 \(hours)小时 \(minutes)分钟",
-                                        traditionalChinese: "剩餘 \(hours)小時 \(minutes)分鐘",
-                                        english: "\(hours) hr \(minutes) min remaining",
-                                        japanese: "残り\(hours)時間\(minutes)分",
-                                        korean: "\(hours)시간 \(minutes)분 남음",
-                                        russian: "Осталось \(hours) ч \(minutes) мин"
-                                    )
-                                } else {
-                                    self.batteryTimeRemaining = ""
-                                }
-                            }
-                        }
-                    }
-                }
+    private func updateBatteryStatus() {
+        let properties = readBatteryProperties()
+        let maxCapacity = (properties?["MaxCapacity"] as? NSNumber)?.doubleValue
+        let current = (properties?["CurrentCapacity"] as? NSNumber)?.doubleValue
+        let connected = (properties?["ExternalConnected"] as? NSNumber)?.boolValue ?? false
+        let charging = (properties?["IsCharging"] as? NSNumber)?.boolValue ?? false
+        DispatchQueue.main.async {
+            guard let maxCapacity, let current, maxCapacity > 0 else {
+                self.batteryDataAvailable = false
+                self.batteryLevel = 0
+                self.isCharging = false
+                self.isPowerConnected = false
+                self.batteryState = "—"
+                self.batteryTimeRemaining = ""
+                return
             }
-        } catch {
-            print("Battery Scan Error: \(error)")
+            self.batteryDataAvailable = true
+            self.batteryLevel = min(1, max(0, current / maxCapacity))
+            self.isCharging = charging
+            self.isPowerConnected = connected
+            let loc = LocalizationManager.shared
+            self.batteryState = connected ? (charging ? loc.text("正在充电", "Charging") : loc.text("已连接电源", "Power Connected")) : loc.text("使用电池", "On Battery")
+            self.batteryTimeRemaining = ""
         }
     }
-    
 
     func checkHighMemoryApps() {
         // 检查是否在暂停期间
@@ -666,103 +610,22 @@ class SystemMonitorService: ObservableObject {
     @Published var memorySwapUsed: String = "0 B"
     @Published var memorySwapTotal: String = "0 B"
     @Published var batteryHealth: String = "—"
-    @Published var batteryCycleCount: Int = 0
+    @Published var batteryCycleCount: Int = -1
     @Published var batteryCondition: String = "—"
     
     private func updateBatteryDetails() {
-         let task = Process()
-         task.launchPath = "/usr/sbin/system_profiler"
-         task.arguments = ["SPPowerDataType"]
-         
-         let pipe = Pipe()
-         task.standardOutput = pipe
-         
-         // Run asynchronously to avoid blocking main thread heavy task
-         DispatchQueue.global(qos: .background).async {
-             do {
-                 try task.run()
-                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                 if let output = String(data: data, encoding: .utf8) {
-                     // Parse Cycle Count and Condition
-                     // "Cycle Count: 123"
-                     // "Condition: Normal"
-                     var cycleCount = 0
-                     var condition = "Normal"
-                     var maxCapacity = 100
-                     
-                     let lines = output.components(separatedBy: "\n")
-                     for line in lines {
-                         if line.contains("Cycle Count:") {
-                             if let val = Int(line.components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces) ?? "") {
-                                 cycleCount = val
-                             }
-                         } else if line.contains("Condition:") {
-                             condition = line.components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces) ?? "Normal"
-                         } else if line.contains("Maximum Capacity:") {
-                              if let val = Int(line.components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "%", with: "") ?? "") {
-                                 maxCapacity = val
-                             }
-                         }
-                     }
-                     
-                     // Batch battery details update
-                     Task {
-                         await self.uiUpdater.batch {
-                             self.batteryCycleCount = cycleCount
-                             let loc = LocalizationManager.shared
-                             switch condition.lowercased() {
-                             case "normal", "good":
-                                 self.batteryCondition = loc.text(
-                                     simplifiedChinese: "正常",
-                                     traditionalChinese: "正常",
-                                     english: "Normal",
-                                     japanese: "正常",
-                                     korean: "정상",
-                                     russian: "Нормальное"
-                                 )
-                             case "fair":
-                                 self.batteryCondition = loc.text(
-                                     simplifiedChinese: "一般",
-                                     traditionalChinese: "一般",
-                                     english: "Fair",
-                                     japanese: "普通",
-                                     korean: "보통",
-                                     russian: "Удовлетворительное"
-                                 )
-                             case "poor", "check battery", "service recommended", "replace soon", "replace now", "service battery":
-                                 self.batteryCondition = loc.text(
-                                     simplifiedChinese: "建议维修",
-                                     traditionalChinese: "建議維修",
-                                     english: "Service Recommended",
-                                     japanese: "修理サービス推奨",
-                                     korean: "서비스 권장",
-                                     russian: "Рекомендуется обслуживание"
-                                 )
-                             default:
-                                 self.batteryCondition = loc.text(
-                                     simplifiedChinese: "未知",
-                                     traditionalChinese: "未知",
-                                     english: "Unknown",
-                                     japanese: "不明",
-                                     korean: "알 수 없음",
-                                     russian: "Неизвестно"
-                                 )
-                             }
-                             self.batteryHealth = "\(maxCapacity)%"
-                         }
-                     }
-                 }
-             } catch {
-                 print("Battery Detail Error: \(error)")
-             }
+        let properties = readBatteryProperties() ?? [:]
+        let cycle = (properties["CycleCount"] as? NSNumber)?.intValue
+        let design = (properties["DesignCapacity"] as? NSNumber)?.doubleValue
+        let maximum = (properties["AppleRawMaxCapacity"] as? NSNumber)?.doubleValue
+        let health = properties["BatteryHealth"] as? String
+        DispatchQueue.main.async {
+            self.batteryCycleCount = cycle ?? -1
+            if let design, let maximum, design > 0 {
+                self.batteryHealth = String(format: "%.0f%%", min(100, max(0, maximum / design * 100)))
+            } else { self.batteryHealth = "—" }
+            self.batteryCondition = health ?? "—"
+        }
     }
-    
-    func formatSpeed(_ bytes: Double) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useKB, .useMB, .useGB]
-        formatter.countStyle = .file
-        formatter.zeroPadsFractionDigits = true
-        return formatter.string(fromByteCount: Int64(bytes)) + "/s"
-    }
-}
+
 }

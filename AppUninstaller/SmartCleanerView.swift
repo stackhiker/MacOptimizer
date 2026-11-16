@@ -575,7 +575,7 @@ struct SmartCleanerView: View {
                     
                     ScanResultStat(
                         value: service.totalResolvedThreats > 0 ? "\(service.totalResolvedThreats)" : (loc.text("好", "Good")),
-                        unit: service.totalResolvedThreats > 0 ? (loc.text("个威胁", "Threats")) : "",
+                        unit: service.totalResolvedThreats > 0 ? (loc.text("个可疑项", "Suspicious items")) : "",
                         detailsAction: nil, // No details for Good
                         color: Color.green, // Green Text
                         loc: loc
@@ -1805,7 +1805,7 @@ private func currentScanPathInColumn(_ title: String) -> String? {
         case .duplicates: return loc.text("重复文件", "Duplicates")
         case .similarPhotos: return loc.text("相似照片", "Similar Photos")
         case .largeFiles: return loc.text("大文件", "Large Files")
-        case .virus: return loc.text("病毒防护", "Virus Protection")
+        case .virus: return loc.text("可疑项检查", "Suspicious Items")
         case .startupItems: return loc.text("启动项", "Startup Items")
         case .performanceApps: return loc.text("性能优化", "Performance")
         case .appUpdates: return loc.text("应用更新", "App Updates")
@@ -1820,7 +1820,7 @@ private func currentScanPathInColumn(_ title: String) -> String? {
         }
         
         switch category {
-        case .virus: return service.virusThreats.isEmpty ? (loc.text("0 个威胁", "0 Threats")) : "\(service.virusThreats.count) \(loc.text("个威胁", "Threats"))"
+        case .virus: return service.virusThreats.isEmpty ? (loc.text("0 个可疑项", "0 suspicious items")) : "\(service.virusThreats.count) \(loc.text("个可疑项", "Suspicious items"))"
         case .startupItems: return "\(service.startupItems.count) \(loc.text("个项目", "Items"))"
         case .performanceApps: return "\(service.performanceApps.count) \(loc.text("个应用", "Apps"))"
         case .appUpdates: return service.hasAppUpdates ? (loc.text("有更新", "Has Update")) : (loc.text("无更新", "No Updates"))
@@ -1838,7 +1838,7 @@ private func currentScanPathInColumn(_ title: String) -> String? {
     korean: "청소 가능",
     russian: "очищаемый"
 )
-        case .virus: return service.virusThreats.isEmpty ? (loc.text("已保护", "Safe")) : (loc.text("可移除", "Removable"))
+        case .virus: return service.virusThreats.isEmpty ? (loc.text("未发现匹配项", "No matches")) : (loc.text("可移除", "Removable"))
         case .startupItems: return loc.text("可优化", "Optimizable")
         case .performanceApps: return loc.text("待查看", "To Review")
         case .appUpdates: return loc.text("要安装", "To Install")
@@ -1886,7 +1886,7 @@ private func currentScanPathInColumn(_ title: String) -> String? {
     private func getCleaningSubText(for category: CleanerCategory) -> String {
         switch category {
         case .systemJunk, .duplicates, .similarPhotos, .largeFiles: return loc.text("已清理", "Cleaned")
-        case .virus: return loc.text("已防护", "Protected")
+        case .virus: return loc.text("已检查", "Checked")
         case .performanceApps, .startupItems: return loc.text("已优化", "Optimized")
         case .appUpdates: return loc.text("已检查", "Checked")
         default: return ""
@@ -1897,7 +1897,7 @@ private func currentScanPathInColumn(_ title: String) -> String? {
         switch category {
         case .systemJunk: return loc.text("正在清理垃圾文件...", "Cleaning junk...")
         case .duplicates, .similarPhotos, .largeFiles: return loc.text("正在整理文件...", "Organizing files...")
-        case .virus: return loc.text("正在移除威胁...", "Removing threats...")
+        case .virus: return loc.text("正在移除所选可疑项...", "Removing selected suspicious items...")
         case .startupItems: return loc.text("正在优化启动项...", "Optimizing startup...")
         case .performanceApps: return loc.text("正在优化性能...", "Optimizing performance...")
         case .appUpdates: return loc.text("正在检查更新状态...", "Checking update status...")

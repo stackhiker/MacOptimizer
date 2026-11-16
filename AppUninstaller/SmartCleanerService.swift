@@ -23,7 +23,7 @@ enum MainCategory: String, CaseIterable, Identifiable {
         case .duplicates: return "Duplicates"
         case .similarPhotos: return "Similar Photos"
         case .largeFiles: return "Large Files"
-        case .virus: return "Virus Threats"
+        case .virus: return "Suspicious Items"
         case .startupItems: return "Startup Items"
         case .performanceApps: return "Performance"
         case .appUpdates: return "App Updates"
@@ -31,6 +31,16 @@ enum MainCategory: String, CaseIterable, Identifiable {
     }
 
     func localizedName(for language: AppLanguage) -> String {
+        if self == .virus {
+            switch language {
+            case .chinese: return "可疑项检查"
+            case .traditionalChinese: return "可疑項目檢查"
+            case .english: return "Suspicious Items"
+            case .japanese: return "不審な項目"
+            case .korean: return "의심 항목"
+            case .russian: return "Подозрительные объекты"
+            }
+        }
         switch language {
         case .chinese:
             return rawValue
@@ -192,7 +202,7 @@ enum CleanerCategory: String, CaseIterable {
         case .similarPhotos: return "Similar Photos"
         case .localizations: return "Localizations"
         case .largeFiles: return "Large Files"
-        case .virus: return "Virus Protection"
+        case .virus: return "Suspicious Items"
         case .appUpdates: return "App Updates"
         case .startupItems: return "Startup Items"
         case .performanceApps: return "Performance"
@@ -200,6 +210,16 @@ enum CleanerCategory: String, CaseIterable {
     }
 
     func localizedName(for language: AppLanguage) -> String {
+        if self == .virus {
+            switch language {
+            case .chinese: return "可疑项检查"
+            case .traditionalChinese: return "可疑項目檢查"
+            case .english: return "Suspicious Items"
+            case .japanese: return "不審な項目"
+            case .korean: return "의심 항목"
+            case .russian: return "Подозрительные объекты"
+            }
+        }
         switch language {
         case .chinese:
             return rawValue

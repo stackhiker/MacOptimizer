@@ -650,26 +650,27 @@ struct ConsoleProtectionDetailView: View {
                 VStack(spacing: 14) {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(service.isMonitoring ? localized("下载实时监控已开启", "Download monitoring is on") : localized("下载实时监控已关闭", "Download monitoring is off"))
+                            Text(service.isMonitoring ? localized("下载名称监控已开启", "Download name monitoring is on") : localized("下载名称监控已关闭", "Download name monitoring is off"))
                                 .font(.system(size: 15, weight: .bold)).foregroundColor(service.isMonitoring ? .green : .white)
-                            Text(localized("监控下载目录中新写入的文件；浏览器内容拦截为独立扩展能力", "Monitors new files in Downloads; browser blocking requires a separate extension"))
+                            Text(localized("仅提示下载目录的可疑名称；不确认病毒、不自动删除", "Flags suspicious names in Downloads; does not confirm malware or delete automatically"))
                                 .font(.system(size: 10)).foregroundColor(.white.opacity(0.48))
                         }
                         Spacer()
                         Toggle("", isOn: Binding(get: { service.isMonitoring }, set: { $0 ? service.startMonitoring() : service.stopMonitoring() }))
                             .toggleStyle(.switch)
                     }.padding(16).consolePanel()
+                    if let error = service.monitoringError { Text(error).font(.caption).foregroundColor(.orange) }
 
                     HStack(spacing: 12) {
                         ConsoleCapabilityCard(title: localized("下载监控", "Downloads"), value: service.isMonitoring ? localized("运行中", "Active") : localized("已关闭", "Off"), symbol: "arrow.down.circle", active: service.isMonitoring) { section = 0 }
                         ConsoleCapabilityCard(title: localized("浏览器拦截", "Browser Blocking"), value: localized("未连接扩展", "Not Connected"), symbol: "safari", active: false) { section = 1 }
-                        ConsoleCapabilityCard(title: localized("威胁记录", "Threats"), value: "\(service.threatHistory.count)", symbol: "exclamationmark.shield", active: service.threatHistory.isEmpty) { section = 2 }
+                        ConsoleCapabilityCard(title: localized("可疑项记录", "Suspicious Items"), value: "\(service.threatHistory.count)", symbol: "exclamationmark.shield", active: service.threatHistory.isEmpty) { section = 2 }
                     }
 
                     Picker("", selection: $section) {
                         Text(localized("下载监控详情", "Download Details")).tag(0)
                         Text(localized("浏览器扩展", "Browser Extension")).tag(1)
-                        Text(localized("威胁记录", "Threat History")).tag(2)
+                        Text(localized("可疑项记录", "Suspicious History")).tag(2)
                     }.pickerStyle(.segmented)
 
                     protectionDetails
@@ -683,7 +684,7 @@ struct ConsoleProtectionDetailView: View {
             VStack(alignment: .leading, spacing: 12) {
                 ConsoleDetailGrid(rows: [
                     (localized("监控位置", "Monitored folder"), FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path ?? "~/Downloads"),
-                    (localized("检测方式", "Detection"), localized("下载目录新增或修改文件触发扫描", "Scan on new or modified files in Downloads")),
+                    (localized("检测方式", "Detection"), localized("下载目录变化触发名称规则检查", "Name-rule check when Downloads changes")),
                     (localized("当前状态", "Status"), service.isMonitoring ? localized("运行中", "Active") : localized("已关闭", "Off"))
                 ])
                 ConsoleSecondaryButton(title: localized("在访达中显示", "Show in Finder"), symbol: "folder") {
@@ -693,7 +694,7 @@ struct ConsoleProtectionDetailView: View {
         } else if section == 1 {
             ConsolePageEmptyState(symbol: "puzzlepiece.extension", title: localized("未连接浏览器内容拦截扩展", "Browser content blocker not connected"), subtitle: localized("当前版本不会生成或展示模拟广告拦截数据。接入 Safari 或其他浏览器扩展后，才能显示真实拦截统计。", "This version does not generate simulated ad-blocking data. Real statistics require a connected browser extension."))
         } else if service.threatHistory.isEmpty {
-            ConsolePageEmptyState(symbol: "checkmark.shield", title: localized("未发现威胁", "No threats detected"), subtitle: localized("当前没有真实的威胁检测记录", "There are no recorded detections"))
+            ConsolePageEmptyState(symbol: "checkmark.shield", title: localized("暂无可疑名称记录", "No suspicious names recorded"), subtitle: localized("无记录不代表系统安全结论", "No records does not establish system safety"))
         } else {
             VStack(spacing: 6) {
                 ForEach(service.threatHistory) { threat in
@@ -701,6 +702,7 @@ struct ConsoleProtectionDetailView: View {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(threat.name).font(.system(size: 12, weight: .semibold)).foregroundColor(.white)
+                            Text(threat.evidenceSummary).font(.system(size: 10)).foregroundColor(.orange).lineLimit(2).help(threat.evidenceSummary)
                             Text(threat.path.path).font(.system(size: 9)).foregroundColor(.white.opacity(0.42)).lineLimit(1).truncationMode(.middle)
                         }
                         Spacer(); Text(threat.type.localizedName).font(.system(size: 9)).foregroundColor(.red)

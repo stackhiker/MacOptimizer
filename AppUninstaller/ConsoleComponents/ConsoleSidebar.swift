@@ -89,6 +89,9 @@ struct ConsoleSidebar: View {
                 }
             }
             
+            SidebarButton(title: loc.text("任务中心", "Tasks"), icon: "list.bullet.rectangle", isSelected: selection == .tasks) { selection = .tasks }
+            SidebarButton(title: loc.text("清理历史与恢复", "History & Recovery"), icon: "arrow.uturn.backward", isSelected: selection == .recovery) { selection = .recovery }
+            SidebarButton(title: loc.text("访问权限", "Access Permissions"), icon: "lock.shield", isSelected: selection == .permissions) { selection = .permissions }
             Spacer()
         }
         .frame(width: 200)

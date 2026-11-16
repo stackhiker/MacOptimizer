@@ -112,6 +112,7 @@ struct SmartCleanerReplicaView: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
             .animation(.easeOut(duration: 0.16), value: showDetailSheet)
         }
+        .onAppear { OperationTrackingBridge.shared.attachSmart(service) }
         .confirmationDialog(
             localized("确认运行", "Confirm Run"),
             isPresented: $showCleanConfirmation
@@ -514,7 +515,7 @@ struct SmartCleanerReplicaView: View {
                 Text(localized("好", "Good"))
                     .font(.system(size: 37, weight: .ultraLight))
                     .foregroundColor(color)
-                Text(localized("没有找到威胁", "No threats found"))
+                Text(localized("没有待处理项", "No matching items"))
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.38))
             }
@@ -523,7 +524,7 @@ struct SmartCleanerReplicaView: View {
                 Text("\(count)")
                     .font(.system(size: 37, weight: .ultraLight))
                     .foregroundColor(.red.opacity(0.90))
-                Text(localized("个威胁", "threats"))
+                Text(localized("个可疑项", "suspicious items"))
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.38))
             }

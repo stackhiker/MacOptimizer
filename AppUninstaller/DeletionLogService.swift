@@ -32,13 +32,18 @@ struct DeletionFailureRecord: Codable {
 
 // MARK: - 删除日志服务
 /// 记录删除的文件，支持恢复到原位置
-class DeletionLogService: ObservableObject {
+// Journal state is protected by logLock; published state is only mutated on main.
+final class DeletionLogService: ObservableObject, @unchecked Sendable {
     static let shared = DeletionLogService()
     
     private let fileManager = FileManager.default
     private let logDirectory: URL
     private let dateFormatter: ISO8601DateFormatter
-    private let logLock = NSLock()
+    private let logLock = NSRecursiveLock()
+    private let restoreQueue = DispatchQueue(label: "com.macoptimizer.restore", qos: .utility)
+    @Published private(set) var lastError: String?
+    private var knownRecords: [UUID: TrashRecord] = [:]
+    private var restoredIDs = Set<UUID>()
     private let moveToTrash: (URL) throws -> URL?
     
     @Published var deletionRecords: [TrashRecord] = []
@@ -63,7 +68,7 @@ class DeletionLogService: ObservableObject {
         dateFormatter.formatOptions = [.withFullDate]
         
         // 加载今天的日志
-        loadTodayLog()
+        loadAllLogs()
         
         // 清理过期日志
         cleanupOldLogs()
@@ -90,10 +95,10 @@ class DeletionLogService: ObservableObject {
     /// Records a successful move and preserves the original error for callers
     /// that need to report individual failures. Callers record caught failures
     /// with logFailure, or use the Boolean logAndDelete convenience method.
-    func trashItem(at url: URL, category: String = "SmartClean") throws {
+    func trashItem(at url: URL, category: String = "SmartClean", sizeHint: Int64? = nil) throws {
         let originalPath = url.path
         
-        let size = CleanupFileSystem.logicalSize(at: url)
+        let size = sizeHint ?? CleanupFileSystem.logicalSize(at: url)
 
         // 使用 trashItem 并获取废纸篓中的新路径
         let trashURL = try moveToTrash(url)
@@ -108,13 +113,17 @@ class DeletionLogService: ObservableObject {
             category: category
         )
 
-        // 添加到内存记录
+        logLock.lock()
+        defer { logLock.unlock() }
+        knownRecords[record.id] = record
+        appendLine(record, prefix: "deletions")
+        // Enqueue publication while holding the same lock as loadAllLogs, so
+        // a refresh cannot publish this record and then receive a duplicate append.
         DispatchQueue.main.async {
-            self.deletionRecords.append(record)
+            if !self.deletionRecords.contains(where: { $0.id == record.id }) {
+                self.deletionRecords.insert(record, at: 0)
+            }
         }
-
-        // 保存到日志文件
-        saveRecord(record)
 
         print("[DeletionLog] ✅ Logged deletion: \(originalPath) -> \(trashPath ?? "unknown")")
     }
@@ -128,55 +137,57 @@ class DeletionLogService: ObservableObject {
     /// - Parameter record: 删除记录
     /// - Returns: 恢复是否成功
     func restore(_ record: TrashRecord) -> Bool {
-        guard let trashPath = record.trashPath else {
-            print("[DeletionLog] ❌ Cannot restore: no trash path recorded")
-            return false
-        }
-        
-        let trashURL = URL(fileURLWithPath: trashPath)
-        let originalURL = URL(fileURLWithPath: record.originalPath)
-        
-        // 检查废纸篓中的文件是否存在
-        guard fileManager.fileExists(atPath: trashPath) else {
-            print("[DeletionLog] ❌ Cannot restore: file not found in trash")
-            return false
-        }
-        
-        // 确保原始目录存在
-        let originalDir = originalURL.deletingLastPathComponent()
-        do {
-            try fileManager.createDirectory(at: originalDir, withIntermediateDirectories: true)
-        } catch {
-            print("[DeletionLog] ❌ Cannot create original directory: \(error)")
-            return false
-        }
-        
-        // 如果原位置已存在文件，先备份
-        if fileManager.fileExists(atPath: record.originalPath) {
-            let backupURL = originalURL.appendingPathExtension("backup_\(Date().timeIntervalSince1970)")
-            try? fileManager.moveItem(at: originalURL, to: backupURL)
-        }
-        
-        // 移动文件回原位置
-        do {
-            try fileManager.moveItem(at: trashURL, to: originalURL)
-            
-            // 更新记录状态
-            if let index = deletionRecords.firstIndex(where: { $0.id == record.id }) {
-                DispatchQueue.main.async {
-                    self.deletionRecords[index].isRestored = true
-                }
+        do { try restoreChecked(record); return true }
+        catch { DispatchQueue.main.async { self.lastError = error.localizedDescription }; return false }
+    }
+
+    func restoreRecord(_ record: TrashRecord) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            restoreQueue.async {
+                do { try self.restoreChecked(record); continuation.resume() }
+                catch { continuation.resume(throwing: error) }
             }
-            
-            print("[DeletionLog] ✅ Restored: \(record.originalPath)")
-            return true
-            
-        } catch {
-            print("[DeletionLog] ❌ Failed to restore: \(error.localizedDescription)")
-            return false
         }
     }
-    
+
+    private func restoreChecked(_ record: TrashRecord) throws {
+        logLock.lock()
+        defer { logLock.unlock() }
+        guard let authoritative = knownRecords[record.id], !authoritative.isRestored,
+              !restoredIDs.contains(record.id), !record.isRestored,
+              authoritative.originalPath == record.originalPath,
+              authoritative.trashPath == record.trashPath,
+              let trashPath = authoritative.trashPath else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let trashURL = URL(fileURLWithPath: trashPath)
+        let original = URL(fileURLWithPath: record.originalPath)
+        // Never move aside or overwrite a file created since the cleanup.
+        guard !fileManager.fileExists(atPath: original.path) else {
+            throw CocoaError(.fileWriteFileExists)
+        }
+        guard fileManager.fileExists(atPath: trashURL.path) else { throw CocoaError(.fileNoSuchFile) }
+        try fileManager.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.moveItem(at: trashURL, to: original)
+        restoredIDs.insert(record.id)
+        var restoredRecord = authoritative
+        restoredRecord.isRestored = true
+        knownRecords[record.id] = restoredRecord
+        let persisted = appendLine(RestorationRecord(id: record.id), prefix: "restorations")
+        DispatchQueue.main.async {
+            if let i = self.deletionRecords.firstIndex(where: { $0.id == record.id }) {
+                self.deletionRecords[i].isRestored = true
+            }
+            if persisted { self.lastError = nil }
+        }
+        if !persisted {
+            throw NSError(domain: "RecoveryJournal", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                "文件已恢复，但恢复记录未能保存。请检查磁盘空间或目录权限。 / File restored, but its recovery record could not be saved."])
+        }
+    }
+
+    private struct RestorationRecord: Codable { let id: UUID }
+
     /// 获取可恢复的文件列表
     func getRestorableRecords() -> [TrashRecord] {
         return deletionRecords.filter { record in
@@ -187,25 +198,59 @@ class DeletionLogService: ObservableObject {
     
     /// 加载所有日志（最近 N 天）
     func loadAllLogs(days: Int = 30) {
-        var allRecords: [TrashRecord] = []
-        
-        let calendar = Calendar.current
-        for dayOffset in 0..<days {
-            guard let date = calendar.date(byAdding: .day, value: -dayOffset, to: Date()) else { continue }
-            let dateString = dateFormatter.string(from: date)
-            let logFile = logDirectory.appendingPathComponent("deletions_\(dateString).json")
-            
-            if let data = try? Data(contentsOf: logFile),
-               let records = try? JSONDecoder().decode([TrashRecord].self, from: data) {
-                allRecords.append(contentsOf: records)
-            }
+        logLock.lock()
+        defer { logLock.unlock() }
+        var all: [TrashRecord] = []
+        var restored = Set<UUID>()
+        for dayOffset in 0..<max(0, min(days, retentionDays)) {
+            guard let date = Calendar.current.date(byAdding: .day, value: -dayOffset, to: Date()) else { continue }
+            let day = dateFormatter.string(from: date)
+            if let data = try? Data(contentsOf: logDirectory.appendingPathComponent("deletions_\(day).json")),
+               let legacy = try? JSONDecoder().decode([TrashRecord].self, from: data) { all += legacy }
+            all += readLines(TrashRecord.self, file: "deletions_\(day).jsonl")
+            restored.formUnion(readLines(RestorationRecord.self, file: "restorations_\(day).jsonl").map(\.id))
         }
-        
-        DispatchQueue.main.async {
-            self.deletionRecords = allRecords.sorted { $0.deletionDate > $1.deletionDate }
+        let result = all.map { record -> TrashRecord in
+            var copy = record
+            copy.isRestored = copy.isRestored || restored.contains(copy.id)
+            return copy
+        }.sorted { $0.deletionDate > $1.deletionDate }
+        restoredIDs.formUnion(restored)
+        for record in result {
+            if restoredIDs.contains(record.id) {
+                var copy = record; copy.isRestored = true; knownRecords[record.id] = copy
+            } else { knownRecords[record.id] = record }
+        }
+        let published = knownRecords.values.sorted { $0.deletionDate > $1.deletionDate }
+        DispatchQueue.main.async { self.deletionRecords = published }
+    }
+
+    private func readLines<T: Decodable>(_ type: T.Type, file: String) -> [T] {
+        guard let data = try? Data(contentsOf: logDirectory.appendingPathComponent(file)) else { return [] }
+        return data.split(separator: 10).compactMap { try? JSONDecoder().decode(type, from: Data($0)) }
+    }
+
+    // One append per successful move instead of re-reading/re-encoding the day.
+    @discardableResult private func appendLine<T: Encodable>(_ record: T, prefix: String) -> Bool {
+        logLock.lock()
+        defer { logLock.unlock() }
+        let file = logDirectory.appendingPathComponent("\(prefix)_\(dateFormatter.string(from: Date())).jsonl")
+        do {
+            var data = try JSONEncoder().encode(record)
+            data.append(10)
+            if !fileManager.fileExists(atPath: file.path) { fileManager.createFile(atPath: file.path, contents: nil) }
+            let handle = try FileHandle(forWritingTo: file)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+            return true
+        } catch {
+            DispatchQueue.main.async { self.lastError = error.localizedDescription }
+            return false
         }
     }
-    
+
     // MARK: - 私有方法
     
     private func loadTodayLog() {

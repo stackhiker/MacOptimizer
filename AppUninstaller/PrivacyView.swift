@@ -12,6 +12,8 @@ struct PrivacyView: View {
     @State private var cleanedSize: Int64 = 0
     @State private var showPermissionAlert = false
     @State private var showingCloseBrowserAlert = false
+    @State private var showCleanupIssue = false
+    @State private var cleanupIssueMessage = ""
     
     // Selection State
     @State private var selectedSidebarItem: SidebarCategory = .permissions
@@ -100,6 +102,11 @@ struct PrivacyView: View {
             Button(loc.L("cancel"), role: .cancel) { }
         } message: {
             Text(loc.text("检测到浏览器正在运行，清理前需要将其关闭以确保数据被彻底清除。", "Browsers are running. They need to be closed to ensure data is completely removed."))
+        }
+        .alert(loc.text("清理未全部完成", "Cleanup not completed"), isPresented: $showCleanupIssue) {
+            Button(loc.text("确定", "OK"), role: .cancel) {}
+        } message: {
+            Text(cleanupIssueMessage)
         }
     }
     
@@ -855,7 +862,15 @@ struct PrivacyView: View {
         let result = await service.cleanSelected()
         await MainActor.run {
             cleanedSize = result.cleaned
-            withAnimation { scanState = .finished }
+            if service.cleanupWasCancelled || result.failed > 0 {
+                cleanupIssueMessage = service.cleanupWasCancelled
+                    ? loc.text("操作已停止，未完成项目已保留。", "Stopped; unfinished items were kept.")
+                    : service.lastCleanupFailures.joined(separator: "\n")
+                showCleanupIssue = true
+                withAnimation { scanState = .completed }
+            } else {
+                withAnimation { scanState = .finished }
+            }
         }
     }
 }

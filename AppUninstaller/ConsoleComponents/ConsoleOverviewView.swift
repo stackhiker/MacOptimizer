@@ -14,6 +14,8 @@ struct ConsoleOverviewView: View {
     @ObservedObject private var diskManager = DiskSpaceManager.shared
     @ObservedObject private var loc = LocalizationManager.shared
 
+    @AppStorage("diskLowSpaceReminder") private var diskLowSpaceReminder = true
+
     private let accent = Color(red: 0.28, green: 0.82, blue: 0.96)
 
     var body: some View {
@@ -22,6 +24,7 @@ struct ConsoleOverviewView: View {
                 overviewHeader
                 metricStrip
                 diskCapacityCard
+                diskActivityCard
 
                 HStack(alignment: .top, spacing: 14) {
                     processRankingCard(
@@ -100,7 +103,7 @@ struct ConsoleOverviewView: View {
                     .fill(Color.green)
                     .frame(width: 6, height: 6)
                     .shadow(color: .green.opacity(0.55), radius: 4)
-                Text(loc.text("每 2 秒实时更新", "Live · 2 sec"))
+                Text(loc.text("实时监控", "Live monitoring"))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.white.opacity(0.68))
             }
@@ -202,7 +205,7 @@ struct ConsoleOverviewView: View {
                 ))
                     .foregroundColor(.white.opacity(0.76))
                 Spacer()
-                Text(diskManager.totalSize > 0
+                Text(diskManager.isAvailable
                      ? String(format: "%.0f%%", diskUsage * 100) : "—")
                     .font(.system(size: 17, weight: .semibold, design: .rounded))
                     .foregroundColor(.white)
@@ -222,7 +225,7 @@ struct ConsoleOverviewView: View {
             HStack(spacing: 12) {
                 Text(diskCapacityDetail)
                 Spacer(minLength: 0)
-                if diskManager.totalSize > 0 {
+                if diskManager.isAvailable {
                     Text(loc.text(
                         simplifiedChinese: "可用 \(diskManager.formattedFree)",
                         traditionalChinese: "可用 \(diskManager.formattedFree)",
@@ -244,12 +247,12 @@ struct ConsoleOverviewView: View {
     }
 
     private var diskUsage: Double {
-        guard diskManager.totalSize > 0 else { return 0 }
+        guard diskManager.isAvailable else { return 0 }
         return min(max(diskManager.usagePercentage, 0), 1)
     }
 
     private var diskCapacityDetail: String {
-        guard diskManager.totalSize > 0 else {
+        guard diskManager.isAvailable else {
             return loc.text(
                 simplifiedChinese: "暂时无法读取磁盘容量",
                 traditionalChinese: "暫時無法讀取磁碟容量",
@@ -267,6 +270,41 @@ struct ConsoleOverviewView: View {
             korean: "사용 중 \(diskManager.formattedUsed) / 총 \(diskManager.formattedTotal)",
             russian: "Занято \(diskManager.formattedUsed) / всего \(diskManager.formattedTotal)"
         )
+    }
+
+    private var diskActivityCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(loc.text("磁盘读写与容量趋势", "Disk Activity & Capacity Trend")).font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Text(loc.text("所有物理磁盘", "All physical disks")).font(.caption2).foregroundColor(.secondary)
+            }
+            HStack(spacing: 24) {
+                Text(loc.text("读取", "Read") + " " + (systemMonitor.diskReadSpeed.map(systemMonitor.formatSpeed) ?? "—"))
+                Text(loc.text("写入", "Write") + " " + (systemMonitor.diskWriteSpeed.map(systemMonitor.formatSpeed) ?? "—"))
+            }.font(.system(size: 11, weight: .medium, design: .monospaced))
+            if diskManager.history.count > 1 {
+                GeometryReader { geometry in
+                    Path { path in
+                        for (i, sample) in diskManager.history.enumerated() {
+                            let point = CGPoint(x: geometry.size.width * Double(i) / Double(max(1, diskManager.history.count - 1)),
+                                                y: geometry.size.height * (1 - sample.usage))
+                            if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                        }
+                    }.stroke(accent, lineWidth: 2)
+                }.frame(height: 28)
+            }
+            Text(loc.text("容量每 30 秒更新，趋势每 5 分钟保留一点；读写为实际计数差值。", "Capacity refreshes every 30 seconds; trend samples every 5 minutes. I/O uses actual counter deltas."))
+                .font(.caption2).foregroundColor(.secondary)
+            if let error = diskManager.readError {
+                Text(loc.text("容量读取失败：", "Capacity unavailable: ") + error).font(.caption).foregroundColor(.orange)
+            }
+            Toggle(loc.text("低空间提醒", "Low-space reminder"), isOn: $diskLowSpaceReminder).font(.caption)
+            if diskLowSpaceReminder, diskManager.isAvailable, diskManager.usagePercentage >= 0.9 {
+                Label(loc.text("磁盘可用空间不足 10%，建议检查大型文件和旧安装包。", "Less than 10% disk space is available. Review large files and old installers."), systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundColor(.orange)
+            }
+        }.padding(14).consoleCardStyle()
     }
 
     private func processRankingCard(

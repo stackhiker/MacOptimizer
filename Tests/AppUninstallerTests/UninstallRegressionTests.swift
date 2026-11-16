@@ -60,7 +60,7 @@ final class UninstallRegressionTests: XCTestCase {
     }
 
     @MainActor
-    func testFailedBundleRemainsListedAfterSuccessfulResidualRemoval() async throws {
+    func testFailedBundlePreservesAssociatedDataAndRemainsListed() async throws {
         let app = try makeApp()
         let residual = try makeFile("preferences.plist")
         app.residualFiles = [ResidualFile(path: residual, type: .preferences, size: 7)]
@@ -73,17 +73,19 @@ final class UninstallRegressionTests: XCTestCase {
         XCTAssertFalse(result.appRemoved)
         XCTAssertEqual(result.failedPaths, [app.path])
         XCTAssertEqual(scanner.apps.map(\.id), [app.id])
-        XCTAssertTrue(app.residualFiles.isEmpty)
+        XCTAssertEqual(app.residualFiles.map(\.path), [residual])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: residual.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: app.path.path))
     }
 
     @MainActor
-    func testBothFailuresKeepAppEvenWhenBundleIsNotFirstFailure() async throws {
+    func testBundleFailureStopsBeforeAnyResidualAttempt() async throws {
         let app = try makeApp()
         let residual = try makeFile("container/data")
         app.residualFiles = [ResidualFile(path: residual, type: .containers, size: 7)]
         let result = await makeRemover(failing: [residual, app.path]).removeApp(app)
-        XCTAssertEqual(result.failedPaths, [residual, app.path])
+        XCTAssertEqual(result.failedPaths, [app.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: residual.path))
         XCTAssertFalse(result.appRemoved)
     }
 
@@ -215,4 +217,29 @@ final class UninstallRegressionTests: XCTestCase {
         XCTAssertEqual(records.count, 12)
         XCTAssertEqual(Set(records.map { $0.failure.path }).count, 12)
     }
+    @MainActor
+    func testRemovalWorkerKeepsMainActorResponsiveAndCancellationPreservesRemainingFile() async throws {
+        let first = try makeFile("first.data")
+        let second = try makeFile("second.data")
+        let entered = expectation(description: "worker started")
+        let release = DispatchSemaphore(value: 0)
+        let remover = FileRemover(trashItem: { url in
+            XCTAssertFalse(Thread.isMainThread)
+            if url == first {
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 3)
+            }
+            try FileManager.default.removeItem(at: url)
+        }, recordFailure: { _ in })
+        let task = Task { await remover.removePaths([(first, 7), (second, 7)]) }
+        await fulfillment(of: [entered], timeout: 2)
+        // This main-actor continuation runs while the I/O worker is waiting.
+        task.cancel()
+        release.signal()
+        let result = await task.value
+        XCTAssertEqual(result.completedPaths, [first])
+        XCTAssertTrue(result.failedPaths.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
+    }
+
 }

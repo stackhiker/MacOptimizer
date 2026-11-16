@@ -24,7 +24,7 @@ struct RemoveConfirmationView: View {
                             .font(.system(size: 20, weight: .bold)) // Larger bold font
                             .foregroundColor(.white)
                         
-                        Text(loc.text("请注意，所选文件移除后将永久消失。仔细查看一下。", "Note: Selected files will be gone forever. Check carefully."))
+                        Text(loc.text("所选文件将移入废纸篓；可在清理历史中恢复。请仔细确认。", "Selected files will move to Trash and can be restored from Cleanup History. Check carefully."))
                             .font(.system(size: 14))
                             .foregroundColor(.white.opacity(0.8))
                             .lineLimit(2)

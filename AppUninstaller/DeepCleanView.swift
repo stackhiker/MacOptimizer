@@ -21,6 +21,7 @@ struct DeepCleanView: View {
     @State private var showCleanConfirmation = false
     @State private var cleanResult: DeepCleanResult?
     @State private var showingFailures = false
+    @State private var cleanupTask: Task<Void, Never>?
     
     var body: some View {
         ZStack {
@@ -45,6 +46,7 @@ struct DeepCleanView: View {
             }
         }
         .onAppear {
+            OperationTrackingBridge.shared.attachDeep(scanner) { cleanupTask?.cancel() }
             // Sync state if already scanning
             if scanner.isScanning {
                 viewState = .scanning
@@ -81,7 +83,7 @@ struct DeepCleanView: View {
     korean: "정리 시작",
     russian: "Начать очистку"
 ), role: .destructive) {
-                Task { @MainActor in
+                cleanupTask = Task { @MainActor in
                     let result = await scanner.cleanSelected()
                     cleanResult = result
                 }

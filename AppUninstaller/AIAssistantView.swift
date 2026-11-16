@@ -26,6 +26,7 @@ struct AIAssistantView: View {
         }
         .frame(width: 740, height: 630)
         .background(agentBackground)
+        .onDisappear { assistant.cancelCurrentRequest() }
     }
 
     private var agentBackground: some View {
@@ -77,6 +78,7 @@ struct AIAssistantView: View {
             .buttonStyle(AIAssistantToolbarButtonStyle())
 
             Button {
+                assistant.cancelCurrentRequest()
                 assistant.isPresented = false
             } label: {
                 Image(systemName: "xmark")
@@ -111,6 +113,10 @@ struct AIAssistantView: View {
                                     .font(.system(size: 12))
                                     .foregroundColor(.white.opacity(0.64))
                                 Spacer()
+                                Button(t("停止", "停止", "Stop", "停止", "중지", "Остановить")) {
+                                    assistant.cancelCurrentRequest()
+                                }
+                                .buttonStyle(.bordered)
                             }
                             .padding(.horizontal, 4)
                         }
@@ -328,7 +334,7 @@ struct AIAssistantView: View {
             .buttonStyle(.bordered)
 
             Button(t("确认清理", "確認清理", "Confirm Cleanup", "クリーンアップを確認", "정리 확인", "Подтвердить очистку")) {
-                Task { await assistant.confirmPendingClean() }
+                assistant.startPendingClean()
             }
             .buttonStyle(.borderedProminent)
             .tint(.orange)
@@ -349,7 +355,7 @@ struct AIAssistantView: View {
         input = ""
         attachments = []
         attachmentError = ""
-        Task { await assistant.submit(request, attachments: sentAttachments, currentModule: currentModule) }
+        assistant.startRequest(request, attachments: sentAttachments, currentModule: currentModule)
     }
 
     private func chooseImages() {

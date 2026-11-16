@@ -12,6 +12,12 @@ struct SpaceLensView: View {
     @State private var currentNode: FileNode?
     @State private var focusedNodeID: UUID?
     @State private var loadingNodeIDs: Set<UUID> = []
+    @State private var loadingTasks: [UUID: Task<Void, Never>] = [:]
+    @State private var scanTask: Task<Void, Never>?
+    @State private var contentRequestID = UUID()
+    @State private var loadingRequestIDs: [UUID: UUID] = [:]
+    @State private var removalTask: Task<Void, Never>?
+    @State private var isRemoving = false
     
     // Selection for landing page
     @State private var selectedDiskPath: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -80,6 +86,13 @@ struct SpaceLensView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear(perform: refreshMountedVolumes)
+        .onDisappear {
+            contentRequestID = UUID()
+            removalTask?.cancel()
+            scanTask?.cancel()
+            loadingTasks.values.forEach { $0.cancel() }
+            scanner.stopScan()
+        }
     }
     
     // MARK: - Landing View
@@ -592,7 +605,14 @@ struct SpaceLensView: View {
                 }
                 .padding(.top, 52)
 
-                resultsHeader
+                VStack(alignment: .leading, spacing: 4) {
+                    resultsHeader
+                    if !scanner.inaccessiblePaths.isEmpty {
+                        Text(loc.text("扫描范围不完整：\(scanner.inaccessiblePaths.count) 个路径无法读取", "Incomplete coverage: \(scanner.inaccessiblePaths.count) unreadable paths"))
+                            .font(.caption).foregroundColor(.orange)
+                            .help(scanner.inaccessiblePaths.prefix(12).joined(separator: "\n"))
+                    }
+                }
 
                 CleanMyMacBottomActionSlot {
                     CleanMyMacBottomActionCluster(accessoryOffset: CGSize(width: 82, height: 0)) {
@@ -610,7 +630,7 @@ struct SpaceLensView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .disabled(selectedSize == 0)
+                        .disabled(selectedSize == 0 || isRemoving)
                     } accessory: {
                         if selectedSize > 0 {
                             Text(ByteCountFormatter.string(fromByteCount: selectedSize, countStyle: .file))
@@ -926,8 +946,23 @@ struct SpaceLensView: View {
     // MARK: - Actions
     func startScan() {
         let path = selectedDiskPath
-        Task {
+        let requestID = UUID()
+        contentRequestID = requestID
+        loadingTasks.values.forEach { $0.cancel() }
+        loadingTasks = [:]
+        loadingRequestIDs = [:]
+        loadingNodeIDs = []
+        scanTask?.cancel()
+        scanTask = Task { @MainActor in
+            let operation = OperationCenter.shared.begin(title: loc.text("空间透镜扫描", "Space Lens Scan")) {
+                guard contentRequestID == requestID else { return }
+                scanTask?.cancel()
+                scanner.stopScan()
+            }
             await scanner.scan(targetURL: path)
+            let stopped = Task.isCancelled || scanner.rootNode == nil
+            OperationCenter.shared.finish(id: operation, state: stopped ? .cancelled : (scanner.inaccessiblePaths.isEmpty ? .completed : .failed),
+                detail: stopped ? loc.text("扫描已停止", "Scan stopped") : loc.text("无法访问 \(scanner.inaccessiblePaths.count) 个路径", "\(scanner.inaccessiblePaths.count) inaccessible paths"))
         }
         withAnimation {
             viewState = 1
@@ -935,6 +970,7 @@ struct SpaceLensView: View {
     }
     
     func stopScan() {
+        scanTask?.cancel()
         scanner.stopScan()
         viewState = 0
     }
@@ -993,9 +1029,14 @@ struct SpaceLensView: View {
         guard !node.childrenLoaded, !loadingNodeIDs.contains(node.id) else { return }
         loadingNodeIDs.insert(node.id)
 
-        Task {
+        let requestID = UUID()
+        loadingRequestIDs[node.id] = requestID
+        loadingTasks[node.id] = Task {
             await scanner.loadChildren(for: node)
             await MainActor.run {
+                guard loadingRequestIDs[node.id] == requestID else { return }
+                loadingRequestIDs[node.id] = nil
+                loadingTasks[node.id] = nil
                 loadingNodeIDs.remove(node.id)
                 if currentNode?.id == node.id {
                     focusedNodeID = node.children.first?.id
@@ -1051,125 +1092,62 @@ struct SpaceLensView: View {
     }
     
     func deleteSelectedItems() {
-        Task {
-            let fileManager = FileManager.default
-            var deletedIDs: Set<UUID> = []
-            var deletedSize: Int64 = 0
-            var failedDeletions: [FailedFileInfo] = []
-            
-            // First attempt: Try direct deletion
-            for item in itemsToRemove {
-                do {
-                    try fileManager.removeItem(at: item.url)
-                    deletedIDs.insert(item.id)
-                    deletedSize += item.size
-                    print("Deleted: \(item.url.path)")
-                } catch {
-                    print("Failed to delete \(item.url.path): \(error)")
-                    // Track failed deletion for retry with admin privileges
-                    failedDeletions.append(FailedFileInfo(
-                        fileName: item.name,
-                        filePath: item.url.path,
-                        fileSize: item.size,
-                        errorReason: error.localizedDescription
-                    ))
-                }
+        guard !isRemoving else { return }
+        isRemoving = true
+        let targets = itemsToRemove
+        let owner = currentNode
+        let requestID = contentRequestID
+        let sizes = Dictionary(targets.map { ($0.url.standardizedFileURL.path, $0.size) }, uniquingKeysWith: max)
+        removalTask = Task { @MainActor in
+            let operation = OperationCenter.shared.begin(title: loc.text("空间透镜清理", "Space Lens Cleanup")) {
+                if contentRequestID == requestID { removalTask?.cancel() }
             }
-            
-            // Second attempt: If there are failures, try with admin privileges
-            if !failedDeletions.isEmpty {
-                let failedPaths = failedDeletions.map { $0.filePath }
-                let adminSuccess = await deleteWithAdminPrivileges(paths: failedPaths)
-                
-                if adminSuccess {
-                    // All admin deletions succeeded
-                    let adminDeletedSize = failedDeletions.reduce(0) { $0 + $1.fileSize }
-                    deletedSize += adminDeletedSize
-                    
-                    // Mark items as deleted by matching paths
-                    for failedItem in failedDeletions {
-                        if let matchingItem = itemsToRemove.first(where: { $0.url.path == failedItem.filePath }) {
-                            deletedIDs.insert(matchingItem.id)
-                        }
-                    }
-                    
-                    failedDeletions.removeAll()
+            let remover = FileRemover(trashItem: { url in
+                guard SafetyGuard.shared.isSafeToDelete(url, ignoreProtection: true) else { throw CocoaError(.fileWriteNoPermission) }
+                try DeletionLogService.shared.trashItem(at: url, category: "SpaceLens", sizeHint: sizes[url.standardizedFileURL.path])
+            }, recordFailure: { DeletionLogService.shared.logFailure($0, category: "SpaceLens") })
+            let result = await remover.removePaths(targets.map { ($0.url, $0.size) })
+            let completed = Set(result.completedPaths.map { $0.standardizedFileURL.path })
+            let removed = targets.filter { completed.contains($0.url.standardizedFileURL.path) }
+            OperationCenter.shared.finish(id: operation, state: Task.isCancelled ? .cancelled : (result.failures.isEmpty ? .completed : .failed), detail: "\(removed.count) / \(targets.count)")
+            guard contentRequestID == requestID else { return }
+            if let owner {
+                owner.children.removeAll { completed.contains($0.url.standardizedFileURL.path) }
+                var ancestor: FileNode? = owner
+                while let node = ancestor {
+                    node.size = max(0, node.size - result.totalSizeRemoved)
+                    ancestor = node.parent
                 }
+                if currentNode?.id == owner.id { focusedNodeID = owner.children.first?.id }
             }
-            
-            // Update UI on main thread
-            await MainActor.run {
-                // Remove deleted nodes from current children
-                if let current = currentNode {
-                    current.children.removeAll { deletedIDs.contains($0.id) }
-                    current.size -= deletedSize
-                    if current.size < 0 { current.size = 0 } // Safety
-                    
-                    self.focusedNodeID = current.children.first?.id
-                    
-                    // Update total scanned size
-                    scanner.totalSize -= deletedSize
-                }
-                
-                // Store cleanup results
-                self.cleanupResults = (
-                    success: deletedIDs.count,
-                    failed: failedDeletions.count,
-                    size: deletedSize
-                )
-                self.failedFiles = failedDeletions
-                
-                // Dismiss confirmation and show results
-                showRemoveConfirmation = false
-                itemsToRemove = []
-                
-                // Play success sound and transition to results
-                playScanCompleteSound {
-                    withAnimation {
-                        self.viewState = 3
-                    }
-                }
-            }
+            scanner.totalSize = max(0, scanner.totalSize - result.totalSizeRemoved)
+            loadingTasks.values.forEach { $0.cancel() }
+            loadingTasks = [:]
+            loadingRequestIDs = [:]
+            loadingNodeIDs = []
+            scanner.invalidateCachedSizes()
+            cleanupResults = (removed.count, result.failures.count, result.totalSizeRemoved)
+            failedFiles = result.failures.map { FailedFileInfo(fileName: $0.path.lastPathComponent, filePath: $0.path.path, fileSize: sizes[$0.path.standardizedFileURL.path] ?? 0, errorReason: $0.message) }
+            showRemoveConfirmation = false
+            itemsToRemove = []
+            isRemoving = false
+            viewState = 3
         }
     }
-    
-    /// Attempts to delete files with admin privileges using AppleScript
-    private func deleteWithAdminPrivileges(paths: [String]) async -> Bool {
-        var safePaths: [String] = []
-        
-        // Validate paths for safety
-        for path in paths {
-            if !path.contains("..") && !path.isEmpty {
-                safePaths.append(path)
-            }
-        }
-        
-        if safePaths.isEmpty {
-            return false
-        }
-        
-        // Build rm commands
-        let rmCommands = safePaths.map { "rm -rf '\($0)'" }.joined(separator: "; ")
-        
-        let script = """
-        do shell script "\(rmCommands)" with administrator privileges
-        """
-        
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            scriptObject.executeAndReturnError(&error)
-            return error == nil
-        }
-        
-        return false
-    }
-    
+
     func resetToLanding() {
+        contentRequestID = UUID()
+        removalTask?.cancel()
+        isRemoving = false
+        loadingRequestIDs = [:]
         viewState = 0
         navigationStack = []
         forwardNavigationStack = []
         currentNode = nil
         focusedNodeID = nil
+        loadingTasks.values.forEach { $0.cancel() }
+        loadingTasks = [:]
+        scanTask?.cancel()
         loadingNodeIDs.removeAll()
         cleanupResults = nil
         failedFiles = []

@@ -236,6 +236,11 @@ final class AIAssistantCoordinator: ObservableObject {
     private let services = ScanServiceManager.shared
     private let maintenanceAgent = MacMaintenanceAgentService.shared
     private var lastOpenedModule: AppModule?
+    private var requestTask: Task<Void, Never>?
+    private var queuedRequestID: UUID?
+    private var currentRequestID: UUID?
+    private var requestOperationID: UUID?
+    private var activeCleanupTarget: AIAssistantTarget?
 
     private init() {}
 
@@ -248,6 +253,56 @@ final class AIAssistantCoordinator: ObservableObject {
             messages.append(.init(role: .assistant, text: currentModuleMessage(currentModule)))
         }
         lastOpenedModule = currentModule
+    }
+
+    private func launchRequest(_ operation: @escaping @MainActor () async -> Void) {
+        guard !isWorking, requestTask == nil else { return }
+        let launchID = UUID()
+        queuedRequestID = launchID
+        requestTask = Task { @MainActor in
+            guard !Task.isCancelled else { return }
+            await operation()
+            if queuedRequestID == launchID {
+                queuedRequestID = nil
+                requestTask = nil
+            }
+        }
+    }
+
+    func startRequest(_ request: String, attachments: [AIAttachment] = [], currentModule: AppModule) {
+        launchRequest { await self.submit(request, attachments: attachments, currentModule: currentModule) }
+    }
+
+    func cancelCurrentRequest() {
+        currentRequestID = nil
+        queuedRequestID = nil
+        requestTask?.cancel()
+        requestTask = nil
+        maintenanceAgent.cancelCleanup()
+        switch activeCleanupTarget {
+        case .smartScan: services.smartCleanerService.stopCleaning()
+        case .systemJunk: services.junkCleaner.stopCleaning()
+        case .mailAttachments: services.junkCleaner.stopMailAttachmentsCleaning()
+        case .privacy: services.privacyScanner.stopCleaning()
+        case .trash: services.trashScanner.stopCleaning()
+        case .malware: services.malwareScanner.stopRemoval()
+        default: break
+        }
+        activeCleanupTarget = nil
+        pendingCleanTargets = []
+        pendingAgentCleanup = []
+        isWorking = false
+        progressText = ""
+        if let id = requestOperationID {
+            OperationCenter.shared.update(id: id,
+                detail: LocalizationManager.shared.text("正在停止…", "Stopping…"))
+            requestOperationID = nil
+        }
+    }
+
+    private func checkRequest(_ id: UUID) throws {
+        try Task.checkCancellation()
+        guard currentRequestID == id else { throw CancellationError() }
     }
 
     func submit(_ request: String, attachments: [AIAttachment] = [], currentModule: AppModule) async {
@@ -266,28 +321,79 @@ final class AIAssistantCoordinator: ObservableObject {
         maintenanceAgent.cancelCleanup()
         isWorking = true
         progressText = organizingMessage
+        let requestID = UUID()
+        currentRequestID = requestID
+        let operationID = OperationCenter.shared.begin(title: LocalizationManager.shared.text("智能体任务", "Agent Task")) {
+            if self.currentRequestID == requestID { self.cancelCurrentRequest() }
+        }
+        requestOperationID = operationID
+        var failed = false
+        defer {
+            let cancelled = Task.isCancelled || currentRequestID != requestID
+            OperationCenter.shared.finish(id: operationID,
+                state: cancelled ? .cancelled : (failed ? .failed : .completed),
+                detail: LocalizationManager.shared.text(cancelled ? "操作已停止" : "任务已结束", cancelled ? "Operation stopped" : "Task finished"))
+            if currentRequestID == requestID {
+                requestOperationID = nil
+                currentRequestID = nil
+                requestTask = nil
+                progressText = ""
+                isWorking = false
+            }
+        }
 
         do {
             try await runMaintenanceAgent(
                 request: providerPrompt,
                 attachments: attachments,
-                currentModule: currentModule
+                currentModule: currentModule,
+                requestID: requestID
             )
+        } catch is CancellationError {
+            // The cancelled generation must never publish a result or cleanup plan.
         } catch {
+            guard currentRequestID == requestID else { return }
+            failed = true
             messages.append(.init(role: .assistant, text: providerFailureMessage(error)))
         }
 
-        progressText = ""
-        isWorking = false
+
+    }
+
+    func startPendingClean() {
+        launchRequest { await self.confirmPendingClean() }
     }
 
     func confirmPendingClean() async {
-        guard !isWorking else { return }
+        guard !isWorking, hasPendingCleanup else { return }
+        let cleanupID = UUID()
+        currentRequestID = cleanupID
+        let operationID = OperationCenter.shared.begin(title: LocalizationManager.shared.text("智能体清理", "Agent Cleanup")) {
+            if self.currentRequestID == cleanupID { self.cancelCurrentRequest() }
+        }
+        requestOperationID = operationID
+        var cleanupFailed = false
+        defer {
+            let cancelled = Task.isCancelled || currentRequestID != cleanupID
+            OperationCenter.shared.finish(id: operationID,
+                state: cancelled ? .cancelled : (cleanupFailed ? .failed : .completed),
+                detail: LocalizationManager.shared.text(cancelled ? "操作已停止" : "清理任务已结束", cancelled ? "Operation stopped" : "Cleanup task finished"))
+            if currentRequestID == cleanupID {
+                requestOperationID = nil
+                currentRequestID = nil
+                requestTask = nil
+                activeCleanupTarget = nil
+                isWorking = false
+                progressText = ""
+            }
+        }
         if !pendingAgentCleanup.isEmpty {
             pendingAgentCleanup = []
             isWorking = true
             progressText = cleaningMessage
             let result = await maintenanceAgent.confirmCleanup()
+            guard currentRequestID == cleanupID else { return }
+            cleanupFailed = result.failedCount > 0
             pendingAgentCleanup = maintenanceAgent.pendingCleanup
             messages.append(.init(
                 role: .assistant,
@@ -311,6 +417,7 @@ final class AIAssistantCoordinator: ObservableObject {
 
         for target in targets {
             if Task.isCancelled { stopped = true; break }
+            activeCleanupTarget = target
             AppNavigationController.shared.selectedModule = target.module
             switch target {
             case .smartScan:
@@ -339,6 +446,7 @@ final class AIAssistantCoordinator: ObservableObject {
                 stopped = stopped || result.wasStopped
             case .privacy:
                 let result = await services.privacyScanner.cleanSelected()
+                stopped = stopped || services.privacyScanner.cleanupWasCancelled
                 cleanedBytes += result.cleaned
                 failedCount += result.failed > 0 ? 1 : 0
             case .trash:
@@ -356,6 +464,8 @@ final class AIAssistantCoordinator: ObservableObject {
             if stopped { break }
         }
 
+        guard currentRequestID == cleanupID else { return }
+        cleanupFailed = failedCount > 0
         messages.append(.init(
             role: .assistant,
             text: (stopped ? LocalizationManager.shared.text("清理已停止。", "Cleanup stopped. ") : "") + cleanCompleteMessage(count: cleanedCount, bytes: cleanedBytes, failed: failedCount)
@@ -372,6 +482,7 @@ final class AIAssistantCoordinator: ObservableObject {
     }
 
     func clearConversation(currentModule: AppModule) {
+        cancelCurrentRequest()
         messages = [.init(role: .assistant, text: welcomeMessage(currentModule))]
         lastOpenedModule = currentModule
         pendingCleanTargets = []
@@ -395,7 +506,8 @@ final class AIAssistantCoordinator: ObservableObject {
     private func runMaintenanceAgent(
         request: String,
         attachments: [AIAttachment],
-        currentModule: AppModule
+        currentModule: AppModule,
+        requestID: UUID
     ) async throws {
         let configuration = settings.configuration()
         var transcript = """
@@ -406,12 +518,14 @@ final class AIAssistantCoordinator: ObservableObject {
         var latestReport: MacAgentToolReport?
 
         for step in 0..<4 {
+            try checkRequest(requestID)
             let raw = try await client.generateJSON(
                 configuration: configuration,
                 systemPrompt: maintenanceAgentSystemPrompt,
                 userPrompt: transcript,
                 attachments: step == 0 ? attachments.map(\.payload) : []
             )
+            try checkRequest(requestID)
             var decision = decodeAgentDecision(raw)
                 ?? fallbackAgentDecision(for: request, hasReport: latestReport != nil)
 
@@ -429,6 +543,7 @@ final class AIAssistantCoordinator: ObservableObject {
 
             progressText = agentProgressMessage(decision.tool)
             let report = await maintenanceAgent.execute(decision.tool, arguments: decision.arguments)
+            try checkRequest(requestID)
             latestReport = report
 
             if decision.tool == .prepareCleanup {

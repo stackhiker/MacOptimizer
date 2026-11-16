@@ -34,7 +34,9 @@
     <key>CFBundleShortVersionString</key>
     <string>5.0</string>
     <key>CFBundleVersion</key>
-    <string>12</string>
+    <string>13</string>
+    <key>UpdateRepository</key>
+    <string>stackhiker/MacOptimizer</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>

@@ -66,8 +66,9 @@ struct PrivacyItem: Identifiable, Equatable {
     let path: URL
     let size: Int64
     let displayPath: String // 用于显示更友好的路径或描述
-    var isSelected: Bool = true
+    var isSelected: Bool = false
     var children: [PrivacyItem]? = nil // 子项列表（用于展开详情）
+    var databaseScope: PrivacyDatabaseScope? = nil
 }
 
 // MARK: - 应用权限项模型
@@ -143,7 +144,20 @@ class PrivacyScannerService: ObservableObject {
     @Published var hasScanned = false
     @Published var isCleaning = false
     @Published var cleanedSize: Int64 = 0
-    private var shouldStopCleaning = false
+    @Published private(set) var cleanupWasCancelled = false
+    @Published private(set) var completedCleanupCount = 0
+    @Published private(set) var cleanedDatabaseCount = 0
+    @Published private(set) var lastCleanupFailures: [String] = []
+    @Published private(set) var lastScanIssues: [String] = []
+    private let cancellationLock = NSLock()
+    private var scanCancellationRequested = false
+    private var cleanupCancellationRequested = false
+    private var scanIssues: [String] = []
+    private let runningBrowsersProvider: () -> [BrowserType]
+    private let requestBrowserQuit: () async -> Bool
+    private let trashPrivacyItem: (URL) throws -> Void
+    private let validateCleanupPath: (URL) -> Bool
+    private let scanStageOverride: ((Int) async -> [PrivacyItem])?
     
     // 统计数据
     var totalHistoryCount: Int { count(for: .history) }
@@ -151,6 +165,46 @@ class PrivacyScannerService: ObservableObject {
     var totalPermissionsCount: Int { count(for: .permissions) }
     
     private let fileManager = FileManager.default
+
+    init(runningBrowsers: @escaping () -> [BrowserType] = { PrivacyScannerService.liveRunningBrowsers() },
+         requestBrowserQuit: @escaping () async -> Bool = { await PrivacyScannerService.quitRunningBrowsers() },
+         trashItem: @escaping (URL) throws -> Void = { try DeletionLogService.shared.trashItem(at: $0, category: "Privacy") },
+         validatePath: @escaping (URL) -> Bool = { SafetyGuard.shared.isSafeToDelete($0, ignoreProtection: true) },
+         scanStage: ((Int) async -> [PrivacyItem])? = nil) {
+        self.runningBrowsersProvider = runningBrowsers
+        self.requestBrowserQuit = requestBrowserQuit
+        self.trashPrivacyItem = trashItem
+        self.validateCleanupPath = validatePath
+        self.scanStageOverride = scanStage
+    }
+
+    func scanIsCancelled() -> Bool {
+        cancellationLock.lock()
+        let stopped = scanCancellationRequested
+        cancellationLock.unlock()
+        return stopped || Task.isCancelled
+    }
+
+    private func cleanupIsCancelled() -> Bool {
+        cancellationLock.lock()
+        let stopped = cleanupCancellationRequested
+        cancellationLock.unlock()
+        return stopped || Task.isCancelled
+    }
+
+    func recordScanIssue(at url: URL, message: String) {
+        cancellationLock.lock()
+        defer { cancellationLock.unlock() }
+        let issue = "\(url.path): \(message)"
+        if scanIssues.count < 50 && !scanIssues.contains(issue) { scanIssues.append(issue) }
+    }
+
+    private func recordScanIssue(at url: URL, error: Error) {
+        let error = error as NSError
+        if (error.domain == NSCocoaErrorDomain && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code)) ||
+            (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT)) { return }
+        recordScanIssue(at: url, message: error.localizedDescription)
+    }
     
     private func count(for type: PrivacyType) -> Int {
         privacyItems.filter { $0.type == type }.count
@@ -165,171 +219,133 @@ class PrivacyScannerService: ObservableObject {
     }
     
     func stopScan() {
+        cancellationLock.lock()
+        scanCancellationRequested = true
+        cancellationLock.unlock()
         shouldStop = true
-        isScanning = false
+        // Keep ownership until the worker exits; a new scan must not revive it.
     }
-    
+
     // MARK: - 扫描方法
     func scanAll() async {
-        await MainActor.run {
+        let started = await MainActor.run { () -> Bool in
+            guard !isScanning, !isCleaning else { return false }
             isScanning = true
             shouldStop = false
-            privacyItems.removeAll()
-            appPermissions.removeAll()
-            browserDataItems.removeAll()
+            cancellationLock.lock()
+            scanCancellationRequested = false
+            scanIssues = []
+            cancellationLock.unlock()
+            privacyItems = []
+            appPermissions = []
+            browserDataItems = []
+            lastScanIssues = []
             scanProgress = 0
             hasScanned = false
-            isCleaning = false
             cleanedSize = 0
+            return true
         }
-        
-        // 1. 扫描浏览器数据
+        guard started else { return }
+
         let browsers = BrowserType.allCases.filter { $0 != .system }
         for (index, browser) in browsers.enumerated() {
-            if shouldStop { break }
-            let items = await scanBrowser(browser)
+            if scanIsCancelled() { break }
+            let items: [PrivacyItem]
+            if let scanStageOverride { items = await scanStageOverride(index) }
+            else { items = await scanBrowser(browser) }
             await MainActor.run {
+                guard !scanIsCancelled() else { return }
                 privacyItems.append(contentsOf: items.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
-                scanProgress = Double(index + 1) / Double(browsers.count + 4)
+                scanProgress = Double(index + 1) / 8
             }
-        }
-        
-        // 2. 扫描最近项目
-        if !shouldStop {
-            let recentItems = await scanRecentItems()
-            await MainActor.run {
-                privacyItems.append(contentsOf: recentItems.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
-                scanProgress += 0.1
-            }
-        }
-        
-        // 3. 扫描应用权限 (TCC)
-        if !shouldStop {
-            let permissions = await scanPermissions()
-            print("🔵 [Privacy] scanPermissions returned \(permissions.count) items")
-            await MainActor.run {
-                privacyItems.append(contentsOf: permissions.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
-                print("🔵 [Privacy] Total privacyItems after adding permissions: \(privacyItems.count)")
-                print("🔵 [Privacy] Permissions items: \(privacyItems.filter { $0.type == .permissions }.count)")
-                
-                // 打印前 10 个权限项
-                let permItems = privacyItems.filter { $0.type == .permissions }
-                for (index, item) in permItems.prefix(10).enumerated() {
-                    print("  \(index + 1). \(item.displayPath)")
-                }
-                
-                scanProgress += 0.1
-            }
-        }
-        
-        // 4. 扫描 Wi-Fi
-        if !shouldStop {
-            let wifiItems = await scanWiFi()
-            await MainActor.run {
-                privacyItems.append(contentsOf: wifiItems.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
-                scanProgress += 0.1
-            }
-        }
-        
-        // 5. 扫描聊天数据
-        if !shouldStop {
-            let chatItems = await scanChatData()
-            await MainActor.run {
-                privacyItems.append(contentsOf: chatItems.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
-                scanProgress += 0.1
-            }
-        }
-        
-        // 6. 扫描开发痕迹 (Terminal, VSCode)
-        if !shouldStop {
-            let devItems = await scanDevelopmentHistory()
-            await MainActor.run {
-                privacyItems.append(contentsOf: devItems.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
-                scanProgress = 1.0
-                isScanning = false
-            }
-        } else {
-             await MainActor.run { isScanning = false }
         }
 
-        await MainActor.run {
-            self.isScanning = false
-            if !self.shouldStop {
-                self.scanProgress = 1.0
-                self.hasScanned = true
-                for index in self.privacyItems.indices {
-                    self.privacyItems[index].isSelected = false
-                    if let children = self.privacyItems[index].children {
-                        for childIndex in children.indices {
-                            self.privacyItems[index].children![childIndex].isSelected = false
-                        }
-                    }
-                }
+        for stage in 0..<5 {
+            if scanIsCancelled() { break }
+            let items: [PrivacyItem]
+            if let scanStageOverride { items = await scanStageOverride(stage + 3) }
+            else { switch stage {
+            case 0: items = await scanRecentItems()
+            case 1: items = await scanPermissions()
+            case 2: items = await scanWiFi()
+            case 3: items = await scanChatData()
+            default: items = await scanDevelopmentHistory()
+            } }
+            await MainActor.run {
+                guard !scanIsCancelled() else { return }
+                privacyItems.append(contentsOf: items.filter { ScanResultIgnoreStore.shouldInclude($0.path) })
+                scanProgress = Double(stage + 4) / 8
             }
         }
+
+        let wasCancelled = scanIsCancelled()
+        await MainActor.run {
+            cancellationLock.lock()
+            let issues = scanIssues
+            cancellationLock.unlock()
+            lastScanIssues = issues
+            isScanning = false
+            shouldStop = wasCancelled
+            hasScanned = !wasCancelled
+            if !wasCancelled { scanProgress = 1 }
+        }
     }
-    
+
     // MARK: - 辅助方法：添加关联文件 (WAL/SHM)
     private func addWithRelatedFiles(path: URL, type: PrivacyType, browser: BrowserType, description: String, to items: inout [PrivacyItem]) {
         if let size = fileSize(at: path) {
             items.append(PrivacyItem(browser: browser, type: type, path: path, size: size, displayPath: description))
         }
         
-        let walPath = path.appendingPathExtension("wal")
+        let walPath = URL(fileURLWithPath: path.path + "-wal")
         if let size = fileSize(at: walPath) {
             items.append(PrivacyItem(browser: browser, type: type, path: walPath, size: size, displayPath: "\(description) (WAL)"))
         }
         
-        let shmPath = path.appendingPathExtension("shm")
+        let shmPath = URL(fileURLWithPath: path.path + "-shm")
         if let size = fileSize(at: shmPath) {
             items.append(PrivacyItem(browser: browser, type: type, path: shmPath, size: size, displayPath: "\(description) (SHM)"))
         }
     }
     
     // MARK: - 进程检测与终止
-    func checkRunningBrowsers() -> [BrowserType] {
-        var running: [BrowserType] = []
-        let apps = NSWorkspace.shared.runningApplications
-        
-        for app in apps {
-            guard let bundleId = app.bundleIdentifier else { continue }
-            if bundleId.contains("com.apple.Safari") {
-                if !running.contains(.safari) { running.append(.safari) }
-            } else if bundleId.contains("com.google.Chrome") {
-                if !running.contains(.chrome) { running.append(.chrome) }
-            } else if bundleId.contains("org.mozilla.firefox") {
-                if !running.contains(.firefox) { running.append(.firefox) }
-            }
+    func checkRunningBrowsers() -> [BrowserType] { runningBrowsersProvider() }
+
+    private static func liveRunningBrowsers() -> [BrowserType] {
+        let identifiers = NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)
+        let browsers: [(BrowserType, String)] = [(.safari, "com.apple.Safari"), (.chrome, "com.google.Chrome"), (.firefox, "org.mozilla.firefox")]
+        return browsers.compactMap { browser, identifier in
+            identifiers.contains(where: { $0 == identifier || $0.hasPrefix(identifier + ".") }) ? browser : nil
         }
-        return running
     }
-    
+
+    /// Called only after the user explicitly chooses Quit All. Never force-quit
+    /// an app which may be showing a save-work prompt.
     func closeBrowsers() async -> Bool {
-        let apps = NSWorkspace.shared.runningApplications
-        var success = true
-        
-        for app in apps {
-            guard let bundleId = app.bundleIdentifier else { continue }
-            if bundleId.contains("com.apple.Safari") || 
-               bundleId.contains("com.google.Chrome") || 
-               bundleId.contains("org.mozilla.firefox") {
-                
-                app.terminate()
-                
-                // 等待一段时间看是否关闭
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
-                if !app.isTerminated {
-                    app.forceTerminate()
-                }
-                
-                if !app.isTerminated {
-                    success = false
-                }
+        guard !Task.isCancelled else { return false }
+        return await requestBrowserQuit()
+    }
+
+    private static func quitRunningBrowsers() async -> Bool {
+        let applications = await MainActor.run {
+            NSWorkspace.shared.runningApplications.filter {
+                ["com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox"].contains($0.bundleIdentifier ?? "")
             }
         }
-        return success
+        for application in applications {
+            if Task.isCancelled { return false }
+            _ = await MainActor.run { application.terminate() }
+        }
+        for _ in 0..<20 {
+            if Task.isCancelled { return false }
+            let finished = await MainActor.run { applications.allSatisfy(\.isTerminated) }
+            if finished { return true }
+            do { try await Task.sleep(nanoseconds: 100_000_000) }
+            catch { return false }
+        }
+        return false
     }
-    
+
     /// 递归切换选中状态
     func toggleSelection(for id: UUID) {
         func toggle(in items: inout [PrivacyItem]) -> Bool {
@@ -362,309 +378,125 @@ class PrivacyScannerService: ObservableObject {
     }
     
     // MARK: - 清理方法
-    func cleanSelected() async -> (cleaned: Int64, failed: Int64) {
+    func cleanSelected(shouldCancel: @escaping () -> Bool = { Task.isCancelled }) async -> (cleaned: Int64, failed: Int64) {
+        let snapshot = await MainActor.run { () -> [PrivacyItem]? in
+            guard !isScanning, !isCleaning else { return nil }
+            isCleaning = true
+            cancellationLock.lock()
+            cleanupCancellationRequested = false
+            cancellationLock.unlock()
+            cleanedSize = 0
+            cleanupWasCancelled = false
+            completedCleanupCount = 0
+            cleanedDatabaseCount = 0
+            lastCleanupFailures = []
+            return privacyItems
+        }
+        guard let snapshot else { return (0, 1) }
+        let cancelled = { self.cleanupIsCancelled() || shouldCancel() }
+        var selected: [PrivacyItem] = []
+        func collect(_ items: [PrivacyItem]) {
+            for item in items {
+                if item.isSelected && item.type != .permissions && item.type != .wifi { selected.append(item) }
+                if let children = item.children { collect(children) }
+            }
+        }
+        collect(snapshot)
+        let groups = Dictionary(grouping: selected, by: { $0.path.standardizedFileURL.path })
+        var completed = Set<UUID>()
         var cleaned: Int64 = 0
         var failed: Int64 = 0
-        var successfullyDeleted: Set<URL> = []
+        var databasesCleaned = 0
+        var failures: [String] = []
 
-        await MainActor.run {
-            self.isCleaning = true
-            self.cleanedSize = 0
-            self.shouldStopCleaning = false
-        }
-        
-        // DEBUG: Print all items and their selection state
-        print("🔍 [DEBUG] Total privacy items: \(privacyItems.count)")
-        for (index, item) in privacyItems.enumerated() {
-            print("  [\(index)] \(item.displayPath) - selected: \(item.isSelected), path: \(item.path.lastPathComponent)")
-        }
-        
-        // 1. Gather all unique paths to delete from selected items (recursive)
-        // IMPORTANT: Skip permission items (type == .permissions) as they can't be deleted as files
-        var pathsToDelete: Set<URL> = []
-        
-        func collectPaths(from items: [PrivacyItem]) {
-            for item in items {
-                if item.isSelected && item.type != .permissions {
-                    // Skip invalid paths like /dev/null
-                    if item.path.path != "/dev/null" && !item.path.path.isEmpty {
-                        pathsToDelete.insert(item.path)
-                    }
-                }
-                if let children = item.children {
-                    collectPaths(from: children)
-                }
-            }
-        }
-        collectPaths(from: privacyItems)
-        
-        print("🧹 [Clean] Starting cleanup of \(pathsToDelete.count) paths")
-        
-        if pathsToDelete.isEmpty {
-            print("⚠️ [Clean] WARNING: No items selected for deletion!")
-            await MainActor.run { self.isCleaning = false }
-            return (0, 0)
-        }
-        
-        let itemsToDelete = privacyItems.filter { $0.isSelected }
-        
-        // 2. Terminate Browsers to release file locks
-        let browsersToClose: Set<String> = Set(itemsToDelete.compactMap {
-            switch $0.browser {
-            case .chrome: return "com.google.Chrome"
-            case .firefox: return "org.mozilla.firefox"
-            case .safari: return "com.apple.Safari"
-            default: return nil
-            }
-        })
-        
-        if !browsersToClose.isEmpty {
-            print("🧹 [Clean] Closing browsers: \(browsersToClose)")
-            for bundleId in browsersToClose {
-                let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
-                for app in apps {
-                    app.terminate()
-                }
-            }
-            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
-            
-            for bundleId in browsersToClose {
-                let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
-                for app in apps {
-                    if !app.isTerminated {
-                        print("🧹 [Clean] Force terminating \(bundleId)")
-                        app.forceTerminate()
-                    }
-                }
-            }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-        
-        // 3. Perform Intelligent Cleaning
-        for path in pathsToDelete {
-            if shouldStopCleaning { break }
-            let pathString = path.path
-            let fileName = path.lastPathComponent
-            
-            // Check if this is a browser database that should be cleaned with SQL
-            if pathString.contains("/Google/Chrome/") {
-                // Use SQL DELETE for Chrome databases to preserve login state
-                if fileName == "History" {
-                    print("🧹 [Clean] Clearing Chrome History with SQL...")
-                    let cleared = clearChromeHistory(at: path)
-                    if cleared > 0 {
-                        successfullyDeleted.insert(path)
-                        print("✅ [Clean] Cleared Chrome History tables")
-                    }
-                    continue
-                } else if fileName == "Cookies" {
-                    print("🧹 [Clean] Clearing Chrome Cookies with SQL...")
-                    let cleared = clearChromeCookies(at: path)
-                    if cleared > 0 {
-                        successfullyDeleted.insert(path)
-                        print("✅ [Clean] Cleared Chrome Cookies")
-                    }
-                    continue
-                } else if fileName == "Web Data" {
-                    print("🧹 [Clean] Clearing Chrome Autofill with SQL...")
-                    let cleared = clearChromeAutofillData(at: path)
-                    if cleared > 0 {
-                        successfullyDeleted.insert(path)
-                        print("✅ [Clean] Cleared Chrome Autofill")
-                    }
-                    continue
-                }
-                // Other Chrome files (GPU Cache, Favicons, etc.) - delete normally
-            } else if pathString.contains("/Safari/") && fileName == "History.db" {
-                print("🧹 [Clean] Clearing Safari History with SQL...")
-                let cleared = clearSafariHistory(at: path)
-                if cleared > 0 {
-                    successfullyDeleted.insert(path)
-                    print("✅ [Clean] Cleared Safari History")
-                }
-                continue
-            }
-            
-            // Default: Delete file normally
+        for key in groups.keys.sorted() {
+            if cancelled() { break }
+            guard let items = groups[key], let first = items.first else { continue }
+            let path = first.path.standardizedFileURL
             do {
-                if fileManager.fileExists(atPath: path.path) {
-                    print("🧹 [Clean] Deleting: \(path.path)")
-                    // ⚠️ 安全修复: 优先使用trashItem
-                    do {
-                        try fileManager.trashItem(at: path, resultingItemURL: nil)
-                        print("✅ [Clean] Moved to trash: \(path.lastPathComponent)")
-                    } catch {
-                        // Keep the result visible if a recoverable move fails.
-                        // Privacy cleanup must not silently become permanent.
-                        throw error
-                    }
-                    
-                    // Verify deletion
-                    if !fileManager.fileExists(atPath: path.path) {
-                        successfullyDeleted.insert(path)
-                        print("✅ [Clean] SUCCESS: \(path.lastPathComponent)")
-                    } else {
-                        print("⚠️ [Clean] File still exists after deletion: \(path.path)")
-                        failed += 1
-                    }
-                    
-                    // Delete related SQLite files
-                    let relatedPaths = [
-                        pathString + "-wal",
-                        pathString + "-shm", 
-                        pathString + "-journal"
-                    ]
-                    for relPath in relatedPaths {
-                        if fileManager.fileExists(atPath: relPath) {
-                            try? fileManager.trashItem(at: URL(fileURLWithPath: relPath), resultingItemURL: nil)
-                        }
-                    }
-                } else {
-                    // File doesn't exist, consider it "cleaned"
-                    successfullyDeleted.insert(path)
+                let running = await MainActor.run { Set(checkRunningBrowsers()) }
+                guard !items.contains(where: { $0.browser != .system && running.contains($0.browser) }) else {
+                    throw PrivacyCleanupError.runningBrowser
                 }
-            } catch let error as NSError {
-                if error.code == 513 || error.domain == NSCocoaErrorDomain {
-                    print("❌ [Clean] PERMISSION DENIED: \(path.lastPathComponent)")
-                    print("   → 请在系统设置中授予\"完全磁盘访问权限\"")
-                } else {
-                    print("❌ [Clean] ERROR: \(path.lastPathComponent) - \(error.localizedDescription)")
+                if cancelled() { break }
+                guard path.path != "/dev/null",
+                      path.path == path.resolvingSymlinksInPath().standardizedFileURL.path,
+                      validateCleanupPath(path) else { throw PrivacyCleanupError.unsafePath }
+                if first.browser == .firefox && path.lastPathComponent == "places.sqlite" {
+                    throw PrivacyCleanupError.unsupportedMixedDatabase
                 }
-                failed += 1
+                let scopes = Set(items.compactMap(\.databaseScope))
+                if !scopes.isEmpty {
+                    guard items.allSatisfy({ $0.databaseScope != nil }) else { throw PrivacyCleanupError.missingScope }
+                    try PrivacyDatabaseCleanup.clean(at: path, scopes: scopes, shouldCancel: cancelled)
+                    databasesCleaned += 1
+                } else {
+                    // An old result without record-level metadata must never turn
+                    // a scoped database operation into a whole-file deletion.
+                    let mixedDatabase = (first.browser == .chrome && ["History", "Cookies", "Web Data"].contains(path.lastPathComponent)) ||
+                        (first.browser == .safari && path.lastPathComponent == "History.db")
+                    guard !mixedDatabase else { throw PrivacyCleanupError.missingScope }
+                    if cancelled() { break }
+                    try trashPrivacyItem(path)
+                    cleaned += items.map(\.size).max() ?? 0
+                }
+                completed.formUnion(items.map(\.id))
+            } catch is CancellationError {
+                stopCleaning()
+                break
+            } catch {
+                failed += Int64(items.count)
+                failures.append("\(path.path): \(error.localizedDescription)")
             }
         }
-        
-        // Calculate cleaned size from successfully deleted paths
-        func sumSize(from items: [PrivacyItem], deleted: Set<URL>) {
-            for item in items {
-                if deleted.contains(item.path) {
-                    cleaned += item.size
-                }
-                if let children = item.children {
-                    sumSize(from: children, deleted: deleted)
-                }
-            }
-        }
-        sumSize(from: privacyItems, deleted: successfullyDeleted)
-        
-        print("🧹 [Clean] Result: \(successfullyDeleted.count) deleted, \(failed) failed")
-        
-        // 4. Handle Recent Items refresh
-        if itemsToDelete.contains(where: { $0.type == .recentItems }) {
-            print("🧹 [Clean] Clearing Finder Recents metadata...")
-            
-            // Kill sharedfilelistd to release .sfl files
-            let task = Process()
-            task.launchPath = "/usr/bin/killall"
-            task.arguments = ["sharedfilelistd"]
-            try? task.run()
-            
-            // Clear Spotlight kMDItemLastUsedDate metadata for recent files
-            // This is what Finder "Recents" actually uses
-            await clearSpotlightRecentMetadata()
-            
-            // Restart Finder to refresh
-            let task2 = Process()
-            task2.launchPath = "/usr/bin/killall"
-            task2.arguments = ["Finder"]
-            try? task2.run()
-            
-            print("✅ [Clean] Finder refresh commands sent")
-        }
-        
-        // 5. Handle Permission Reset using tccutil
-        let selectedPermissions = privacyItems.filter { $0.type == .permissions && $0.isSelected }
-        if !selectedPermissions.isEmpty {
-            print("🔒 [Clean] Resetting \(selectedPermissions.count) TCC permissions...")
-            await resetTCCPermissions(selectedPermissions)
-        }
-        
-        
-        let finalDeleted = successfullyDeleted // Create immutable copy for thread safety
-        let finalCleanedSize = cleaned
+
+        let wasCancelled = cancelled()
+        let completedIDs = completed
+        let finalCleaned = cleaned
+        let finalFailed = failed
+        let finalFailures = failures
+        let finalDatabaseCount = databasesCleaned
         await MainActor.run {
-            // Remove successfully deleted file items from list
-            privacyItems.removeAll { item in
-                finalDeleted.contains(item.path)
-            }
-            self.cleanedSize = finalCleanedSize
-            self.isCleaning = false
+            privacyItems = Self.retainingUncompleted(privacyItems, completedIDs: completedIDs)
+            cleanedSize = finalCleaned
+            completedCleanupCount = completedIDs.count
+            cleanedDatabaseCount = finalDatabaseCount
+            lastCleanupFailures = finalFailures
+            cleanupWasCancelled = wasCancelled
+            isCleaning = false
         }
-        
-        return (cleaned, failed)
+        return (finalCleaned, finalFailed)
+    }
+
+    private static func retainingUncompleted(_ items: [PrivacyItem], completedIDs: Set<UUID>) -> [PrivacyItem] {
+        items.compactMap { item in
+            guard !completedIDs.contains(item.id) else { return nil }
+            var retained = item
+            if let children = item.children {
+                retained.children = retainingUncompleted(children, completedIDs: completedIDs)
+            }
+            return retained
+        }
     }
 
     func stopCleaning() {
-        shouldStopCleaning = true
+        cancellationLock.lock()
+        cleanupCancellationRequested = true
+        cancellationLock.unlock()
     }
 
     func reset() {
-        shouldStop = true
-        shouldStopCleaning = true
+        stopScan()
+        stopCleaning()
         privacyItems = []
         appPermissions = []
         browserDataItems = []
-        isScanning = false
         scanProgress = 0
         hasScanned = false
-        isCleaning = false
         cleanedSize = 0
+        // Active workers retain ownership until they observe cancellation.
     }
-    
-    /// Clear Spotlight kMDItemLastUsedDate metadata from recently used files
-    /// This is what Finder "Recents" smart folder actually uses
-    private func clearSpotlightRecentMetadata() async {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        
-        // Common directories where recent files are typically found
-        let directories = [
-            home.appendingPathComponent("Desktop"),
-            home.appendingPathComponent("Documents"),
-            home.appendingPathComponent("Downloads")
-        ]
-        
-        var clearedCount = 0
-        
-        for dir in directories {
-            guard fileManager.fileExists(atPath: dir.path) else { continue }
-            
-            // Get files in directory (non-recursive to avoid too many files)
-            if let contents = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-                for file in contents.prefix(100) { // Limit to 100 files per directory
-                    // Use xattr to remove kMDItemLastUsedDate
-                    let process = Process()
-                    process.launchPath = "/usr/bin/xattr"
-                    process.arguments = ["-d", "com.apple.metadata:kMDItemLastUsedDate", file.path]
-                    process.standardOutput = FileHandle.nullDevice
-                    process.standardError = FileHandle.nullDevice
-                    
-                    try? process.run()
-                    process.waitUntilExit()
-                    
-                    if process.terminationStatus == 0 {
-                        clearedCount += 1
-                    }
-                }
-            }
-        }
-        
-        print("🧹 [Clean] Cleared kMDItemLastUsedDate from \(clearedCount) files")
-    }
-    
-    /// Reset TCC permissions using tccutil command
-    /// WARNING: This feature is DISABLED because tccutil reset resets ALL apps' permissions,
-    /// including our own app's FDA and ScreenCapture permissions, which breaks the app.
-    /// For now, permissions are VIEW-ONLY. Users should manage permissions in System Settings.
-    private func resetTCCPermissions(_ permissions: [PrivacyItem]) async {
-        print("⚠️ [TCC] Permission reset is DISABLED to protect app functionality.")
-        print("   Permissions are view-only. Please manage permissions in System Settings.")
-        print("   Selected \(permissions.count) permissions for review.")
-        
-        // Do NOT actually reset permissions as it would break the app
-        // The previous implementation using tccutil reset was too dangerous
-        // because it resets permissions for ALL apps, not just third-party apps.
-    }
-    
+
     // MARK: - Helper Scanning Methods
     
     private func scanBrowser(_ browser: BrowserType) async -> [PrivacyItem] {
@@ -690,7 +522,9 @@ class PrivacyScannerService: ObservableObject {
         
         // 1. History
         let historyURL = home.appendingPathComponent("Library/Safari/History.db")
-        addWithRelatedFiles(path: historyURL, type: .history, browser: .safari, description: "Safari 浏览记录数据库", to: &items)
+        if let size = fileSize(at: historyURL) {
+            items.append(PrivacyItem(browser: .safari, type: .history, path: historyURL, size: size, displayPath: "Safari 浏览记录数据库", databaseScope: .safariHistory))
+        }
         
         // 2. Downloads
         let downloadsURL = home.appendingPathComponent("Library/Safari/Downloads.plist")
@@ -711,6 +545,7 @@ class PrivacyScannerService: ObservableObject {
         ]
         
         for cookiesURL in cookiesPaths {
+            if scanIsCancelled() { break }
             if let size = fileSize(at: cookiesURL) {
                 items.append(PrivacyItem(browser: .safari, type: .cookies, path: cookiesURL, size: size, displayPath: "Safari Cookie 文件"))
                 print("   ✅ Found Safari Cookies at: \(cookiesURL.path)")
@@ -800,7 +635,7 @@ class PrivacyScannerService: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let chromeDir = home.appendingPathComponent("Library/Application Support/Google/Chrome")
         
-        guard fileManager.fileExists(atPath: chromeDir.path) else { return [] }
+        guard scanDirectoryExists(chromeDir) else { return [] }
         
         print("🔍 [Chrome] Starting deep scan...")
         
@@ -812,15 +647,14 @@ class PrivacyScannerService: ObservableObject {
         }
         
         // 查找其他 Profile
-        if let contents = try? fileManager.contentsOfDirectory(at: chromeDir, includingPropertiesForKeys: nil) {
-            for item in contents where item.lastPathComponent.hasPrefix("Profile ") {
-                profiles.append(item)
-            }
+        for item in scanDirectoryContents(chromeDir) where item.lastPathComponent.hasPrefix("Profile ") {
+            profiles.append(item)
         }
         
         print("   Found \(profiles.count) Chrome profiles")
         
         for profile in profiles {
+            if scanIsCancelled() { break }
             let profileName = profile.lastPathComponent
             
             // ===== 1. 解析 History 数据库 =====
@@ -832,13 +666,13 @@ class PrivacyScannerService: ObservableObject {
                 print("   ✅ \(profileName) - History: \(visits) visits, \(downloads) downloads, \(searches) searches")
                 
                 if visits > 0 {
-                    items.append(PrivacyItem(browser: .chrome, type: .history, path: historyURL, size: historySize, displayPath: "Chrome 浏览历史 (\(profileName)) - \(visits) 条记录"))
+                    items.append(PrivacyItem(browser: .chrome, type: .history, path: historyURL, size: historySize, displayPath: "Chrome 浏览历史 (\(profileName)) - \(visits) 条记录", databaseScope: .chromeBrowsingHistory))
                 }
                 if downloads > 0 {
-                    items.append(PrivacyItem(browser: .chrome, type: .downloads, path: historyURL, size: 0, displayPath: "Chrome 下载历史 (\(profileName)) - \(downloads) 条记录"))
+                    items.append(PrivacyItem(browser: .chrome, type: .downloads, path: historyURL, size: 0, displayPath: "Chrome 下载历史 (\(profileName)) - \(downloads) 条记录", databaseScope: .chromeDownloadHistory))
                 }
                 if searches > 0 {
-                    items.append(PrivacyItem(browser: .chrome, type: .history, path: historyURL, size: 0, displayPath: "Chrome 搜索问题 (\(profileName)) - \(searches) 条记录"))
+                    items.append(PrivacyItem(browser: .chrome, type: .history, path: historyURL, size: 0, displayPath: "Chrome 搜索问题 (\(profileName)) - \(searches) 条记录", databaseScope: .chromeSearchQueries))
                 }
             }
             
@@ -859,7 +693,8 @@ class PrivacyScannerService: ObservableObject {
                             type: .cookies,
                             path: cookiesURL,
                             size: 0,
-                            displayPath: "\(domain) - \(count) 项"
+                            displayPath: "\(domain) - \(count) 项",
+                            databaseScope: .chromeCookies(domain: domain)
                         )
                     }
                     
@@ -869,7 +704,8 @@ class PrivacyScannerService: ObservableObject {
                         path: cookiesURL, 
                         size: cookieSize, 
                         displayPath: "Chrome Cookies (\(profileName)) - \(cookieCount) 个",
-                        children: children.isEmpty ? nil : children
+                        children: children.isEmpty ? nil : children,
+                        databaseScope: .chromeCookies(domain: nil)
                     ))
                 }
             }
@@ -896,7 +732,7 @@ class PrivacyScannerService: ObservableObject {
                 print("   ✅ \(profileName) - Autofill: \(autofillCount) entries")
                 
                 if autofillCount > 0 {
-                    items.append(PrivacyItem(browser: .chrome, type: .history, path: webDataURL, size: webDataSize, displayPath: "Chrome 自动填充表格 (\(profileName)) - \(autofillCount) 个"))
+                    items.append(PrivacyItem(browser: .chrome, type: .history, path: webDataURL, size: webDataSize, displayPath: "Chrome 自动填充表格 (\(profileName)) - \(autofillCount) 个", databaseScope: .chromeAutofill))
                 }
             }
             
@@ -933,6 +769,7 @@ class PrivacyScannerService: ObservableObject {
             // ===== 10. Session Data =====
             let sessionFiles = ["Last Session", "Last Tabs", "Current Session", "Current Tabs", "Top Sites", "Shortcuts", "Visited Links", "Favicons"]
             for sFile in sessionFiles {
+                if scanIsCancelled() { break }
                 let sURL = profile.appendingPathComponent(sFile)
                 if let size = fileSize(at: sURL) {
                     items.append(PrivacyItem(browser: .chrome, type: .history, path: sURL, size: size, displayPath: "Chrome \(sFile) (\(profileName))"))
@@ -950,7 +787,7 @@ class PrivacyScannerService: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let firefoxDir = home.appendingPathComponent("Library/Application Support/Firefox/Profiles")
         
-        guard fileManager.fileExists(atPath: firefoxDir.path) else { return [] }
+        guard scanDirectoryExists(firefoxDir) else { return [] }
         
         print("🔍 [Firefox] Starting deep scan...")
         
@@ -959,10 +796,11 @@ class PrivacyScannerService: ObservableObject {
         _ = getAppIcon(for: .firefox)
         
         // 获取所有 Profile
-        let profiles = (try? fileManager.contentsOfDirectory(at: firefoxDir, includingPropertiesForKeys: nil)) ?? []
+        let profiles = scanDirectoryContents(firefoxDir)
         print("   Found \(profiles.count) Firefox profiles")
         
         for profile in profiles {
+            if scanIsCancelled() { break }
             let profileName = profile.lastPathComponent
             if profileName.hasPrefix(".") { continue } // 跳过隐藏文件
             
@@ -1048,9 +886,14 @@ class PrivacyScannerService: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser
         
         let sflBase = home.appendingPathComponent("Library/Application Support/com.apple.sharedfilelist")
-        if fileManager.fileExists(atPath: sflBase.path) {
-            let enumerator = fileManager.enumerator(at: sflBase, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles, .skipsPackageDescendants])
+        if scanDirectoryExists(sflBase) {
+            let enumerator = fileManager.enumerator(at: sflBase, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { url, error in
+                self.recordScanIssue(at: url, error: error)
+                return !self.scanIsCancelled()
+            })
+            if enumerator == nil { recordScanIssue(at: sflBase, message: "Unable to enumerate directory") }
             while let fileURL = enumerator?.nextObject() as? URL {
+                if scanIsCancelled() { break }
                 let name = fileURL.lastPathComponent
                 if name.hasSuffix(".sfl2") || name.hasSuffix(".sfl3") {
                     if let size = fileSize(at: fileURL) {
@@ -1074,6 +917,7 @@ class PrivacyScannerService: ObservableObject {
             "Library/Preferences/com.apple.recentitems.plist"
         ]
         for p in plists {
+            if scanIsCancelled() { break }
             let url = home.appendingPathComponent(p)
             if fileManager.fileExists(atPath: url.path), let size = fileSize(at: url) {
                 items.append(PrivacyItem(browser: .system, type: .recentItems, path: url, size: size, displayPath: "主要系统记录: \(url.lastPathComponent)"))
@@ -1115,11 +959,12 @@ class PrivacyScannerService: ObservableObject {
         
         // 4. 更新到 appPermissions
         await MainActor.run {
-            self.appPermissions = allPermissions
+            if !scanIsCancelled() { self.appPermissions = allPermissions }
         }
         
         // 5. 为兼容性：也创建 PrivacyItem 格式的权限记录（每个权限一项）
         for perm in allPermissions {
+            if scanIsCancelled() { break }
             items.append(PrivacyItem(
                 browser: .system,
                 type: .permissions,
@@ -1284,6 +1129,7 @@ class PrivacyScannerService: ObservableObject {
         ]
         
         for (filename, displayName) in shellHistories {
+            if scanIsCancelled() { break }
             let historyURL = home.appendingPathComponent(filename)
             if let size = fileSize(at: historyURL) {
                 items.append(PrivacyItem(
@@ -1331,23 +1177,54 @@ class PrivacyScannerService: ObservableObject {
         return items
     }
 
-    private func fileSize(at url: URL) -> Int64? {
-        // 如果没有权限读取，可能会失败
-        guard let attrs = try? fileManager.attributesOfItem(atPath: url.path) else { return nil }
-        return attrs[.size] as? Int64
+    private func scanDirectoryExists(_ url: URL) -> Bool {
+        if scanIsCancelled() { return false }
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: url.path)
+            return attributes[.type] as? FileAttributeType == .typeDirectory
+        } catch {
+            recordScanIssue(at: url, error: error)
+            return false
+        }
     }
-    
+
+    private func scanDirectoryContents(_ url: URL) -> [URL] {
+        if scanIsCancelled() { return [] }
+        do { return try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) }
+        catch { recordScanIssue(at: url, error: error); return [] }
+    }
+
+    private func fileSize(at url: URL) -> Int64? {
+        if scanIsCancelled() { return nil }
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: url.path)
+            return attributes[.size] as? Int64
+        } catch {
+            recordScanIssue(at: url, error: error)
+            return nil
+        }
+    }
+
     private func folderSize(at url: URL) -> Int64? {
-        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return nil }
+        if scanIsCancelled() { return nil }
+        do { _ = try fileManager.attributesOfItem(atPath: url.path) }
+        catch { recordScanIssue(at: url, error: error); return nil }
+        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey], errorHandler: { failedURL, error in
+            self.recordScanIssue(at: failedURL, error: error)
+            return !self.scanIsCancelled()
+        }) else {
+            recordScanIssue(at: url, message: "Unable to enumerate directory")
+            return nil
+        }
         var size: Int64 = 0
         for case let fileURL as URL in enumerator {
-            if let fileSize = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                size += Int64(fileSize)
-            }
+            if scanIsCancelled() { return nil }
+            do { size += Int64(try fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) }
+            catch { recordScanIssue(at: fileURL, error: error) }
         }
         return size
     }
-    
+
     // MARK: - TCC 数据库解析
     
     /// 解析 TCC 数据库，获取应用权限列表
@@ -1356,8 +1233,9 @@ class PrivacyScannerService: ObservableObject {
         
         // 1. 打开 SQLite 数据库
         var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
-            print("Failed to open TCC database at \(url.path)")
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            recordScanIssue(at: url, message: db.map { String(cString: sqlite3_errmsg($0)) } ?? "Cannot read permissions database")
+            if let db { sqlite3_close(db) }
             return []
         }
         defer { sqlite3_close(db) }
@@ -1366,13 +1244,14 @@ class PrivacyScannerService: ObservableObject {
         let query = "SELECT service, client, auth_value, last_modified FROM access WHERE client_type = 0"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else {
-            print("Failed to prepare TCC query")
+            recordScanIssue(at: url, message: String(cString: sqlite3_errmsg(db)))
             return []
         }
         defer { sqlite3_finalize(statement) }
         
         // 3. 遍历结果
         while sqlite3_step(statement) == SQLITE_ROW {
+            if scanIsCancelled() { break }
             guard let servicePtr = sqlite3_column_text(statement, 0),
                   let clientPtr = sqlite3_column_text(statement, 1) else { continue }
             

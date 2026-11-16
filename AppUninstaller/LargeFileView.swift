@@ -10,9 +10,8 @@ struct LargeFileView: View {
     @State private var selectedScanName = "mac"
     @State private var showVolumePicker = false
     
-    // For disk usage bar simulation/real data
-    @State private var totalDiskSpace: Int64 = 500 * 1024 * 1024 * 1024 // Fake default
-    @State private var usedDiskSpace: Int64 = 100 * 1024 * 1024 * 1024
+    @State private var totalDiskSpace: Int64 = 0
+    @State private var usedDiskSpace: Int64 = 0
     
     var body: some View {
         ZStack {
@@ -33,14 +32,15 @@ struct LargeFileView: View {
                     }
             }
         }
+        .onAppear { OperationTrackingBridge.shared.attachLarge(scanner) }
     }
     
     private func updateDiskUsage() {
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: selectedScanRoot.path),
            let size = attrs[.systemSize] as? Int64,
            let free = attrs[.systemFreeSize] as? Int64 {
-            totalDiskSpace = size
-            usedDiskSpace = size - free
+            totalDiskSpace = max(0, size)
+            usedDiskSpace = min(totalDiskSpace, max(0, size - free))
         }
     }
     
@@ -150,7 +150,7 @@ struct LargeFileView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 4) {
-                        Text("\(selectedScanName): \(ByteCountFormatter.string(fromByteCount: totalDiskSpace, countStyle: .file))")
+                        Text("\(selectedScanName): \(totalDiskSpace > 0 ? ByteCountFormatter.string(fromByteCount: totalDiskSpace, countStyle: .file) : "—")")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.white)
                         Spacer()
@@ -166,7 +166,7 @@ struct LargeFileView: View {
                     }
                     .frame(height: 4)
 
-                    Text(loc.text("已使用 \(ByteCountFormatter.string(fromByteCount: usedDiskSpace, countStyle: .file))", "Used \(ByteCountFormatter.string(fromByteCount: usedDiskSpace, countStyle: .file))"))
+                    Text(totalDiskSpace > 0 ? loc.text("已使用 \(ByteCountFormatter.string(fromByteCount: usedDiskSpace, countStyle: .file))", "Used \(ByteCountFormatter.string(fromByteCount: usedDiskSpace, countStyle: .file))") : "—")
                         .font(.system(size: 10))
                         .foregroundColor(.white.opacity(0.52))
                 }

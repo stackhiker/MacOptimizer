@@ -37,7 +37,7 @@ struct StorageDetailView: View {
                         
                         // Data Ring (Free Space for contrast or Used Space?)
                         // Show Used Space in Color for better visualization.
-                        let usedPercent = 1.0 - (Double(diskManager.freeSize) / Double(diskManager.totalSize))
+                        let usedPercent = diskManager.isAvailable ? min(1, max(0, diskManager.usagePercentage)) : 0
                         
                         Circle()
                             .trim(from: 0, to: CGFloat(usedPercent))
@@ -67,18 +67,17 @@ struct StorageDetailView: View {
                     }
                     .padding(.top, 10)
                     
-                    // Breakdown Grid
                     VStack(spacing: 12) {
-                        // Mock Categories for Visuals (since we don't scan full file types instantly in menu bar)
-                        // In a real app we'd fetch these from a background service
-                        StorageCategoryRow(color: .blue, name: loc.text("应用程序", "Applications"), size: "35.09 GB")
-                        StorageCategoryRow(color: .cyan, name: loc.text("文稿", "Documents"), size: "12.4 GB")
-                        StorageCategoryRow(color: .purple, name: loc.text("系统数据", "System Data"), size: "89.2 GB")
-                        StorageCategoryRow(color: .pink, name: loc.text("照片", "Photos"), size: "5.1 GB")
-                        StorageCategoryRow(color: .gray, name: loc.text("其他", "Other"), size: "10.2 GB")
+                        StorageCategoryRow(color: .blue, name: loc.text("已用空间", "Used"), size: diskManager.formattedUsed)
+                        StorageCategoryRow(color: .green, name: loc.text("可用空间", "Available"), size: diskManager.formattedFree)
+                        Text(loc.text("分类容量尚未采集；可打开空间透镜查看目录占用。", "Category sizes are not collected. Open Space Lens to inspect folder usage."))
+                            .font(.caption).foregroundColor(.secondary)
+                    }.padding(.horizontal, 20)
+
+                    if let error = diskManager.readError {
+                        Text(error).font(.caption).foregroundColor(.orange).padding(.horizontal, 20)
                     }
-                    .padding(.horizontal, 20)
-                    
+
                     // Quick Actions
                     HStack(spacing: 12) {
                         Button(action: {

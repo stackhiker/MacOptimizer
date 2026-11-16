@@ -4,7 +4,7 @@ import SwiftUI
 /// CleanMyMac X Privacy reconstruction. Scanning is read-only; cleanup remains
 /// recoverable where possible and app-permission rows are review-only rather
 /// than silently resetting unrelated macOS privacy grants.
-struct PrivacyReplicaView: View {
+@MainActor struct PrivacyReplicaView: View {
     @ObservedObject private var service = ScanServiceManager.shared.privacyScanner
     @ObservedObject private var loc = LocalizationManager.shared
 
@@ -16,9 +16,13 @@ struct PrivacyReplicaView: View {
     @State private var quitPromptPurpose: QuitPurpose = .scan
     @State private var showPermissionReviewAlert = false
     @State private var showCleanupFailure = false
+    @State private var showCleanupStopped = false
+    @State private var showScanIssues = false
     @State private var cleanupFinished = false
     @State private var cleanedAmount: Int64 = 0
     @State private var orbHovered = false
+    @State private var activeRequestID: UUID?
+    @State private var privacyTask: Task<Void, Never>?
 
     private enum PageState {
         case initial, scanning, details, cleaning, finished
@@ -70,7 +74,10 @@ struct PrivacyReplicaView: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .onChange(of: service.hasScanned) { scanned in
-            if scanned { selectedSource = firstPopulatedSource }
+            if scanned {
+                selectedSource = firstPopulatedSource
+                showScanIssues = !service.lastScanIssues.isEmpty
+            }
         }
         .alert(localized("一些应用程序应该退出。", "Some applications should quit."), isPresented: $showQuitPrompt) {
             Button(localized("忽略", "Ignore")) { continueWithoutQuitting() }
@@ -82,7 +89,7 @@ struct PrivacyReplicaView: View {
             }
             Button(localized("取消", "Cancel"), role: .cancel) {}
         } message: {
-            Text(localized("请退出正在运行的浏览器，以扫描或清理所有与之相关的项目。", "Quit running browsers to scan or clean all related items."))
+            Text(localized("请先保存浏览器中的工作。“忽略”会保留运行中浏览器的数据；“全部退出”只请求正常退出，不会强制关闭。", "Save your browser work first. Ignore keeps data for running browsers; Quit All requests a normal exit and never forces it."))
         }
         .alert(localized("应用权限需要在系统设置中管理", "Manage app permissions in System Settings"), isPresented: $showPermissionReviewAlert) {
             Button(localized("打开系统设置", "Open System Settings")) {
@@ -97,7 +104,17 @@ struct PrivacyReplicaView: View {
         .alert(localized("部分隐私项目未能移除", "Some privacy items could not be removed"), isPresented: $showCleanupFailure) {
             Button(localized("完成", "Done"), role: .cancel) {}
         } message: {
-            Text(localized("失败项目会继续保留在扫描结果中。", "Failed items remain in the scan results."))
+            Text(localized("失败项目会继续保留在扫描结果中。", "Failed items remain in the scan results.") + "\n\n" + service.lastCleanupFailures.prefix(5).joined(separator: "\n"))
+        }
+        .alert(localized("清理已停止", "Cleanup stopped"), isPresented: $showCleanupStopped) {
+            Button(localized("完成", "Done"), role: .cancel) {}
+        } message: {
+            Text(localized("已完成 \(service.completedCleanupCount) 项。未完成的项目已保留，可检查后重试。", "Completed \(service.completedCleanupCount) items. Unfinished items remain available for review and retry."))
+        }
+        .alert(localized("部分位置未能扫描", "Some locations could not be scanned"), isPresented: $showScanIssues) {
+            Button(localized("完成", "Done"), role: .cancel) {}
+        } message: {
+            Text(localized("结果仅包含可读取的位置，请检查这些位置的访问权限：", "Results include readable locations only. Check access to these locations:") + "\n" + service.lastScanIssues.prefix(5).joined(separator: "\n"))
         }
     }
 
@@ -492,7 +509,9 @@ struct PrivacyReplicaView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(localized("清理完毕", "Cleanup complete"))
                         .font(.system(size: 24, weight: .bold)).foregroundColor(.white.opacity(0.96))
-                    Text(localized("您的 Mac 现在安全了！已清理 ", "Your Mac is safe now. Cleaned ") + ByteCountFormatter.string(fromByteCount: cleanedAmount, countStyle: .file))
+                    Text(localized("已处理 \(service.completedCleanupCount) 项；已清理 \(service.cleanedDatabaseCount) 个数据库中的所选记录。", "Processed \(service.completedCleanupCount) items; cleared selected records in \(service.cleanedDatabaseCount) databases."))
+                        .font(.system(size: 12)).foregroundColor(.white.opacity(0.52))
+                    Text(localized("移至废纸篓：", "Moved to Trash: ") + ByteCountFormatter.string(fromByteCount: cleanedAmount, countStyle: .file))
                         .font(.system(size: 12)).foregroundColor(.white.opacity(0.52))
                 }
             }
@@ -803,9 +822,27 @@ struct PrivacyReplicaView: View {
         }
     }
 
-    private func startScan() {
-        Task {
+    @MainActor private func startScan() {
+        guard activeRequestID == nil, !service.isScanning, !service.isCleaning else { return }
+        let requestID = UUID()
+        activeRequestID = requestID
+        let operationID = OperationCenter.shared.begin(title: localized("隐私扫描", "Privacy Scan")) {
+            guard activeRequestID == requestID else { return }
+            // Cancel this task, not the service's next owner after navigation.
+            privacyTask?.cancel()
+        }
+        privacyTask = Task { @MainActor in
             await service.scanAll()
+            let cancelled = Task.isCancelled || service.shouldStop
+            OperationCenter.shared.finish(id: operationID,
+                state: cancelled ? .cancelled : (service.lastScanIssues.isEmpty ? .completed : .failed),
+                detail: cancelled
+                    ? localized("扫描已停止；未扫描范围未作判断。", "Scan stopped; unscanned locations were not assessed.")
+                    : localized("发现 \(service.privacyItems.count) 项；\(service.lastScanIssues.count) 处无法完整读取。", "Found \(service.privacyItems.count) items; \(service.lastScanIssues.count) locations could not be fully read."))
+            if activeRequestID == requestID {
+                activeRequestID = nil
+                privacyTask = nil
+            }
             if service.hasScanned {
                 selectedSource = firstPopulatedSource
                 playCompletionSound()
@@ -813,10 +850,30 @@ struct PrivacyReplicaView: View {
         }
     }
 
-    private func startClean() {
-        Task {
+    @MainActor private func startClean() {
+        guard activeRequestID == nil, !service.isScanning, !service.isCleaning else { return }
+        cleanupFinished = false
+        let requestID = UUID()
+        activeRequestID = requestID
+        let operationID = OperationCenter.shared.begin(title: localized("隐私清理", "Privacy Cleanup")) {
+            guard activeRequestID == requestID else { return }
+            privacyTask?.cancel()
+        }
+        privacyTask = Task { @MainActor in
             let result = await service.cleanSelected()
             cleanedAmount = result.cleaned
+            let cancelled = Task.isCancelled || service.cleanupWasCancelled
+            OperationCenter.shared.finish(id: operationID,
+                state: cancelled ? .cancelled : (result.failed > 0 ? .failed : .completed),
+                detail: localized("已处理 \(service.completedCleanupCount) 项；\(result.failed) 项未完成。", "Processed \(service.completedCleanupCount) items; \(result.failed) items were not completed."))
+            if activeRequestID == requestID {
+                activeRequestID = nil
+                privacyTask = nil
+            }
+            if cancelled {
+                showCleanupStopped = true
+                return
+            }
             if result.failed > 0 {
                 showCleanupFailure = true
                 return

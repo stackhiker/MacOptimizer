@@ -32,11 +32,12 @@ struct CPUDetailView: View {
                             .font(.system(size: 12))
                             .foregroundColor(.white.opacity(0.6))
                         
-                        HStack(alignment: .bottom, spacing: 4) {
-                            ForEach(0..<20) { _ in
+                        HStack(alignment: .bottom, spacing: 2) {
+                            ForEach(Array(systemMonitor.cpuUsageHistory.enumerated()), id: \.offset) { _, usage in
                                 RoundedRectangle(cornerRadius: 2)
                                     .fill(Color.blue.opacity(0.8))
-                                    .frame(width: 8, height: CGFloat.random(in: 10...80))
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: max(2, CGFloat(usage) * 80))
                             }
                         }
                         .frame(height: 100)

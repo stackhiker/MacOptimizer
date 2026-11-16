@@ -133,6 +133,7 @@ struct SystemJunkReplicaView: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .onAppear {
+            OperationTrackingBridge.shared.attachJunk(cleaner)
             if !cleaner.junkItems.isEmpty, selectedDescriptor.type == nil {
                 selectedCategoryID = firstPopulatedCategoryID
             }

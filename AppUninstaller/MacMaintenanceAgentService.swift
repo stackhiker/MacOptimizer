@@ -77,6 +77,7 @@ struct MacAgentCleanupResult: Sendable {
     let cleanedBytes: Int64
     let failedCount: Int
     var failedPaths: Set<String> = []
+    var unprocessedPaths: Set<String> = []
 }
 
 @MainActor
@@ -90,22 +91,23 @@ final class MacMaintenanceAgentService: ObservableObject {
     private init() {}
 
     func execute(_ tool: MacAgentTool, arguments: MacAgentArguments?) async -> MacAgentToolReport {
+        guard !Task.isCancelled else { return cancelledReport(tool) }
         let report: MacAgentToolReport
         switch tool {
         case .scanJunk:
             let days = max(1, arguments?.olderThanDays ?? 3)
-            report = await Task.detached(priority: .userInitiated) { Self.scanJunk(olderThanDays: days) }.value
+            report = await readOnlyWorker { Self.scanJunk(olderThanDays: days) }
         case .scanLargeFiles:
             let minimumMB = max(10, arguments?.minimumSizeMB ?? 100)
-            report = await Task.detached(priority: .userInitiated) { Self.scanLargeFiles(minimumSizeMB: minimumMB) }.value
+            report = await readOnlyWorker { Self.scanLargeFiles(minimumSizeMB: minimumMB) }
         case .scanDuplicates:
-            report = await Task.detached(priority: .userInitiated) { Self.scanDuplicates() }.value
+            report = await readOnlyWorker { Self.scanDuplicates() }
         case .inspectStorage:
-            report = await Task.detached(priority: .userInitiated) { Self.inspectStorage() }.value
+            report = await readOnlyWorker { Self.inspectStorage() }
         case .inspectSystem:
-            report = await Task.detached(priority: .userInitiated) { Self.inspectSystem() }.value
+            report = await readOnlyWorker { Self.inspectSystem() }
         case .inspectStartup:
-            report = await Task.detached(priority: .userInitiated) { Self.inspectStartup() }.value
+            report = await readOnlyWorker { Self.inspectStartup() }
         case .listResults:
             report = lastReport ?? .init(tool: .listResults, findings: [], facts: ["state": "no_previous_scan"])
         case .prepareCleanup:
@@ -114,8 +116,9 @@ final class MacMaintenanceAgentService: ObservableObject {
             if let lastReport {
                 source = lastReport
             } else {
-                source = await Task.detached(priority: .userInitiated) { Self.scanJunk(olderThanDays: 3) }.value
+                source = await readOnlyWorker { Self.scanJunk(olderThanDays: 3) }
             }
+            guard !Task.isCancelled else { return cancelledReport(tool) }
             let safe = source.findings.filter { Self.isSafeCleanupFinding($0) }
             pendingCleanup = safe
             report = .init(
@@ -127,10 +130,20 @@ final class MacMaintenanceAgentService: ObservableObject {
             report = lastReport ?? .init(tool: .finish, findings: [], facts: [:])
         }
 
+        guard !Task.isCancelled else { return cancelledReport(tool) }
         if tool != .finish && tool != .listResults && tool != .prepareCleanup {
             lastReport = report
         }
         return report
+    }
+
+    private func cancelledReport(_ tool: MacAgentTool) -> MacAgentToolReport {
+        .init(tool: tool, findings: [], facts: ["state": "cancelled"])
+    }
+
+    private func readOnlyWorker<T: Sendable>(_ operation: @escaping @Sendable () -> T) async -> T {
+        let worker = Task.detached(priority: .utility, operation: operation)
+        return await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
     }
 
     func confirmCleanup() async -> MacAgentCleanupResult {
@@ -141,7 +154,8 @@ final class MacMaintenanceAgentService: ObservableObject {
         defer { isCleaning = false }
         let task = Task.detached(priority: .userInitiated) { await Self.cleanFindings(targets) }
         let result = await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
-        pendingCleanup = targets.filter { result.failedPaths.contains($0.path) }
+        let retained = result.failedPaths.union(result.unprocessedPaths)
+        pendingCleanup = targets.filter { retained.contains($0.path) }
         return result
     }
 
@@ -155,13 +169,22 @@ final class MacMaintenanceAgentService: ObservableObject {
         var bytes: Int64 = 0
         var failed = Set<String>()
         var seen = Set<String>()
-        for finding in targets where seen.insert(finding.path).inserted {
+        let uniqueTargets = targets.filter { seen.insert($0.path).inserted }
+        var unprocessed = Set<String>()
+        for (index, finding) in uniqueTargets.enumerated() {
+            if Task.isCancelled {
+                unprocessed.formUnion(uniqueTargets[index...].map(\.path))
+                break
+            }
             let url = URL(fileURLWithPath: finding.path)
             do {
-                guard !Task.isCancelled else { throw CancellationError() }
                 guard allowed(finding) else {
                     throw NSError(domain: "CleanupSafety", code: 1, userInfo: [NSLocalizedDescriptionKey:
                         "The file changed, is protected, or is no longer eligible for cleanup."])
+                }
+                if Task.isCancelled {
+                    unprocessed.formUnion(uniqueTargets[index...].map(\.path))
+                    break
                 }
                 try moveToTrash(url)
                 count += 1
@@ -171,7 +194,8 @@ final class MacMaintenanceAgentService: ObservableObject {
                 recordFailure(RemovalFailure(path: url, error: error))
             }
         }
-        return .init(cleanedCount: count, cleanedBytes: bytes, failedCount: failed.count, failedPaths: failed)
+        return .init(cleanedCount: count, cleanedBytes: bytes, failedCount: failed.count,
+            failedPaths: failed, unprocessedPaths: unprocessed)
     }
 
     func cancelCleanup() {
@@ -221,9 +245,11 @@ final class MacMaintenanceAgentService: ObservableObject {
         return duplicateReport(in: roots)
     }
 
-    nonisolated static func duplicateReport(in roots: [URL], limit: Int = 50_000) -> MacAgentToolReport {
+    nonisolated static func duplicateReport(in roots: [URL], limit: Int = 50_000,
+        shouldCancel: () -> Bool = { Task.isCancelled }) -> MacAgentToolReport {
         var candidates: [MacAgentFinding] = []
         for root in roots {
+            if shouldCancel() { return .init(tool: .scanDuplicates, findings: [], facts: ["state": "cancelled"]) }
             candidates.append(contentsOf: enumerateFiles(at: root, category: .duplicateFile, limit: limit) { values in
                 (values.fileSize ?? 0) >= 1_024
             })
@@ -235,9 +261,11 @@ final class MacMaintenanceAgentService: ObservableObject {
         var duplicateGroupCount = 0
 
         for sizeGroup in sameSizeGroups {
+            if shouldCancel() { return .init(tool: .scanDuplicates, findings: [], facts: ["state": "cancelled"]) }
             var byDigest: [String: [MacAgentFinding]] = [:]
             for finding in sizeGroup {
-                guard let digest = sha256(of: URL(fileURLWithPath: finding.path)) else { continue }
+                if shouldCancel() { return .init(tool: .scanDuplicates, findings: [], facts: ["state": "cancelled"]) }
+                guard let digest = sha256(of: URL(fileURLWithPath: finding.path), shouldCancel: shouldCancel) else { continue }
                 byDigest[digest, default: []].append(finding)
             }
             for digestGroup in byDigest.values where digestGroup.count > 1 {
@@ -259,14 +287,15 @@ final class MacMaintenanceAgentService: ObservableObject {
         )
     }
 
-    nonisolated private static func sha256(of url: URL) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    nonisolated static func sha256(of url: URL, shouldCancel: () -> Bool = { Task.isCancelled }) -> String? {
+        guard !shouldCancel(), let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         var hasher = SHA256()
         do {
-            while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty {
+            while !shouldCancel(), let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty {
                 hasher.update(data: chunk)
             }
+            guard !shouldCancel() else { return nil }
             return hasher.finalize().map { String(format: "%02x", $0) }.joined()
         } catch {
             return nil

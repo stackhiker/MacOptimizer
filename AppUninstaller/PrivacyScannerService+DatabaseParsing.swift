@@ -35,7 +35,7 @@ extension PrivacyScannerService {
         }
         defer { sqlite3_finalize(statement) }
         
-        while sqlite3_step(statement) == SQLITE_ROW {
+        while !scanIsCancelled(), sqlite3_step(statement) == SQLITE_ROW {
             var row: [String: Any] = [:]
             let columns = sqlite3_column_count(statement)
             
@@ -93,13 +93,14 @@ extension PrivacyScannerService {
         do {
             try FileManager.default.copyItem(at: url, to: tempURL)
         } catch {
-            print("❌ Failed to copy Chrome History for reading: \(error.localizedDescription)")
+            recordScanIssue(at: url, message: error.localizedDescription)
             return (0, 0, 0)
         }
         
         var db: OpaquePointer?
         guard sqlite3_open(tempURL.path, &db) == SQLITE_OK else {
-            print("❌ Failed to open Chrome History copy: \(tempURL.path)")
+            recordScanIssue(at: url, message: "Cannot read database copy")
+            if let db { sqlite3_close(db) }
             return (0, 0, 0)
         }
         defer { sqlite3_close(db) }
@@ -118,11 +119,14 @@ extension PrivacyScannerService {
         do {
             try FileManager.default.copyItem(at: url, to: tempURL)
         } catch {
+            recordScanIssue(at: url, message: error.localizedDescription)
             return (nil, nil)
         }
         
         var db: OpaquePointer?
         guard sqlite3_open(tempURL.path, &db) == SQLITE_OK else {
+            recordScanIssue(at: url, message: "Cannot read database copy")
+            if let db { sqlite3_close(db) }
             try? FileManager.default.removeItem(at: tempURL)
             return (nil, nil)
         }
@@ -185,7 +189,9 @@ extension PrivacyScannerService {
     /// 解析 Safari History 数据库
     func parseSafariHistory(at url: URL) -> Int {
         var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            recordScanIssue(at: url, message: db.map { String(cString: sqlite3_errmsg($0)) } ?? "Cannot read database")
+            if let db { sqlite3_close(db) }
             return 0
         }
         defer { sqlite3_close(db) }
@@ -208,7 +214,9 @@ extension PrivacyScannerService {
     /// 解析 Firefox History (places.sqlite)
     func parseFirefoxHistory(at url: URL) -> Int {
         var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            recordScanIssue(at: url, message: db.map { String(cString: sqlite3_errmsg($0)) } ?? "Cannot read database")
+            if let db { sqlite3_close(db) }
             return 0
         }
         defer { sqlite3_close(db) }
@@ -220,7 +228,9 @@ extension PrivacyScannerService {
     /// 解析 Firefox Cookies (cookies.sqlite)
     func parseFirefoxCookies(at url: URL) -> Int {
         var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            recordScanIssue(at: url, message: db.map { String(cString: sqlite3_errmsg($0)) } ?? "Cannot read database")
+            if let db { sqlite3_close(db) }
             return 0
         }
         defer { sqlite3_close(db) }
@@ -231,7 +241,9 @@ extension PrivacyScannerService {
     /// 解析 Firefox Form History (formhistory.sqlite)
     func parseFirefoxFormHistory(at url: URL) -> Int {
         var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            recordScanIssue(at: url, message: db.map { String(cString: sqlite3_errmsg($0)) } ?? "Cannot read database")
+            if let db { sqlite3_close(db) }
             return 0
         }
         defer { sqlite3_close(db) }
@@ -239,129 +251,4 @@ extension PrivacyScannerService {
         return countRows(db: db, table: "moz_formhistory")
     }
     
-    // MARK: - 智能浏览器数据清理 (使用 SQL DELETE 而不是删除文件)
-    
-    /// 执行 SQL DELETE 语句
-    private func executeDelete(db: OpaquePointer?, sql: String) -> Bool {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-            return false
-        }
-        defer { sqlite3_finalize(statement) }
-        
-        return sqlite3_step(statement) == SQLITE_DONE
-    }
-    
-    /// 清理 Chrome 浏览历史 (使用 SQL DELETE，保留登录状态)
-    func clearChromeHistory(at url: URL) -> Int {
-        var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
-            print("❌ [Clean] Failed to open Chrome History for cleaning")
-            return 0
-        }
-        defer { sqlite3_close(db) }
-        
-        var deleted = 0
-        
-        // 清除 visits 表 (访问记录)
-        if executeDelete(db: db, sql: "DELETE FROM visits") {
-            deleted += 1
-            print("✅ [Clean] Cleared Chrome visits")
-        }
-        
-        // 清除 urls 表 (URL 记录)
-        if executeDelete(db: db, sql: "DELETE FROM urls") {
-            deleted += 1
-            print("✅ [Clean] Cleared Chrome urls")
-        }
-        
-        // 清除 downloads 表 (下载记录)
-        if executeDelete(db: db, sql: "DELETE FROM downloads") {
-            deleted += 1
-            print("✅ [Clean] Cleared Chrome downloads")
-        }
-        
-        // 清除 keyword_search_terms 表 (搜索记录)
-        if executeDelete(db: db, sql: "DELETE FROM keyword_search_terms") {
-            deleted += 1
-            print("✅ [Clean] Cleared Chrome search terms")
-        }
-        
-        // VACUUM 压缩数据库
-        _ = executeDelete(db: db, sql: "VACUUM")
-        
-        return deleted
-    }
-    
-    /// 清理 Chrome Cookies (会退出网站登录，但保留 Google 同步账号)
-    func clearChromeCookies(at url: URL) -> Int {
-        var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
-            print("❌ [Clean] Failed to open Chrome Cookies for cleaning")
-            return 0
-        }
-        defer { sqlite3_close(db) }
-        
-        // 删除所有 cookies
-        if executeDelete(db: db, sql: "DELETE FROM cookies") {
-            print("✅ [Clean] Cleared Chrome cookies")
-            _ = executeDelete(db: db, sql: "VACUUM")
-            return 1
-        }
-        return 0
-    }
-    
-    /// 清理 Chrome 自动填充 (保留已保存的密码)
-    func clearChromeAutofillData(at url: URL) -> Int {
-        var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
-            print("❌ [Clean] Failed to open Chrome Web Data for cleaning")
-            return 0
-        }
-        defer { sqlite3_close(db) }
-        
-        var deleted = 0
-        
-        // 清除自动填充数据
-        if executeDelete(db: db, sql: "DELETE FROM autofill") {
-            deleted += 1
-            print("✅ [Clean] Cleared Chrome autofill")
-        }
-        
-        // 清除自动填充档案
-        if executeDelete(db: db, sql: "DELETE FROM autofill_profiles") {
-            deleted += 1
-            print("✅ [Clean] Cleared Chrome autofill profiles")
-        }
-        
-        _ = executeDelete(db: db, sql: "VACUUM")
-        return deleted
-    }
-    
-    /// 清理 Safari 浏览历史 (使用 SQL DELETE)
-    func clearSafariHistory(at url: URL) -> Int {
-        var db: OpaquePointer?
-        guard sqlite3_open(url.path, &db) == SQLITE_OK else {
-            print("❌ [Clean] Failed to open Safari History for cleaning")
-            return 0
-        }
-        defer { sqlite3_close(db) }
-        
-        var deleted = 0
-        
-        // 清除访问记录
-        if executeDelete(db: db, sql: "DELETE FROM history_visits") {
-            deleted += 1
-            print("✅ [Clean] Cleared Safari history_visits")
-        }
-        
-        // 清除 URL 记录
-        if executeDelete(db: db, sql: "DELETE FROM history_items") {
-            deleted += 1
-            print("✅ [Clean] Cleared Safari history_items")
-        }
-        
-        _ = executeDelete(db: db, sql: "VACUUM")
-        return deleted
-    }
 }

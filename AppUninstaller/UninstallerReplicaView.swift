@@ -29,6 +29,7 @@ struct UninstallerReplicaView: View {
     @State private var resultFailures: [RemovalFailure] = []
     @State private var showFailureDetails = false
     @State private var orbHovered = false
+    @State private var removalTask: Task<Void, Never>?
 
     private let fileRemover = FileRemover()
     private let vendors = ["Google", "MacPaw", "JetBrains", "其他"]
@@ -62,12 +63,17 @@ struct UninstallerReplicaView: View {
                 }
             }
         }
-        .onAppear {
-            Task { await loadApplicationsAndRelatedFilesIfNeeded() }
+        .task { await loadApplicationsIfNeeded() }
+        .task(id: category) {
+            if category == .leftovers { await loadLeftovers() }
         }
+        .task(id: detailedApp?.id) {
+            if let app = detailedApp { await appScanner.scanResidualFiles(for: app) }
+        }
+        .onDisappear { appScanner.cancelScanning() }
         .alert(localized("确认移除？", "Confirm Removal?"), isPresented: $showRemoveConfirmation) {
             Button(actionTitle, role: .destructive) {
-                Task { await removeSelection() }
+                startRemoval { await removeSelection() }
             }
             Button(localized("取消", "Cancel"), role: .cancel) {}
         } message: {
@@ -114,6 +120,8 @@ struct UninstallerReplicaView: View {
                         Text(localized("正在移入废纸篓…", "Moving to Trash…"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.white.opacity(0.82))
+                        Button(localized("停止", "Stop")) { removalTask?.cancel() }
+                            .buttonStyle(.bordered)
                     }
                     .padding(.horizontal, 28)
                     .padding(.vertical, 22)
@@ -389,7 +397,7 @@ struct UninstallerReplicaView: View {
             .padding(.bottom, 8)
 
             AppDetailView(app: app) { includeApp, moveToTrash in
-                Task { await removeSingleApp(app, includeApp: includeApp, moveToTrash: moveToTrash) }
+                startRemoval { await removeSingleApp(app, includeApp: includeApp, moveToTrash: moveToTrash) }
             }
         }
     }
@@ -530,7 +538,10 @@ struct UninstallerReplicaView: View {
 
     private func toggleApp(_ app: InstalledApp) {
         if selectedAppIDs.contains(app.id) { selectedAppIDs.remove(app.id) }
-        else { selectedAppIDs.insert(app.id) }
+        else {
+            selectedAppIDs.insert(app.id)
+            Task { await appScanner.scanResidualFiles(for: app) }
+        }
     }
 
     private func toggleLeftover(_ item: DeepCleanItem) {
@@ -539,23 +550,35 @@ struct UninstallerReplicaView: View {
     }
 
     @MainActor
-    private func loadApplicationsAndRelatedFilesIfNeeded() async {
-        if appScanner.apps.isEmpty {
-            await appScanner.scanApplications()
-        }
+    private func loadApplicationsIfNeeded() async {
+        if appScanner.apps.isEmpty { await appScanner.scanApplications() }
+    }
+
+    @MainActor
+    private func loadLeftovers() async {
         guard !isLoadingRelatedFiles else { return }
         isLoadingRelatedFiles = true
-
-        for app in appScanner.apps where app.residualFiles.isEmpty {
-            await appScanner.scanResidualFiles(for: app)
-        }
-
+        defer { isLoadingRelatedFiles = false }
         let scanner = DeepCleanScanner()
-        leftovers = await scanner.scanUninstallerResiduals()
-            .filter(isTrueLeftover)
-            .filter { ScanResultIgnoreStore.shouldInclude($0.url) }
-        selectedLeftoverIDs.subtract(leftovers.map(\.id))
-        isLoadingRelatedFiles = false
+        let results = await scanner.scanUninstallerResiduals()
+        guard !Task.isCancelled else { return }
+        leftovers = results.filter(isTrueLeftover).filter { ScanResultIgnoreStore.shouldInclude($0.url) }
+        selectedLeftoverIDs.formIntersection(Set(leftovers.map(\.id)))
+    }
+
+    @MainActor
+    private func startRemoval(_ operation: @escaping @MainActor () async -> Void) {
+        guard removalTask == nil else { return }
+        let id = OperationCenter.shared.begin(title: localized("应用卸载", "Uninstall Applications")) {
+            removalTask?.cancel()
+        }
+        removalTask = Task { @MainActor in
+            await operation()
+            OperationCenter.shared.finish(id: id,
+                state: Task.isCancelled ? .cancelled : (resultFailures.isEmpty ? .completed : .failed),
+                detail: resultMessage)
+            removalTask = nil
+        }
     }
 
     private func isTrueLeftover(_ item: DeepCleanItem) -> Bool {
@@ -590,17 +613,10 @@ struct UninstallerReplicaView: View {
             let targets = leftovers.filter { selectedLeftoverIDs.contains($0.id) }
             var success = 0
             var failed = 0
-            for item in targets {
-                do {
-                    try DeletionLogService.shared.trashItem(at: item.url, category: "UninstallerLeftovers")
-                    success += 1
-                } catch {
-                    let failure = RemovalFailure(path: item.url, error: error)
-                    DeletionLogService.shared.logFailure(failure, category: "UninstallerLeftovers")
-                    resultFailures.append(failure)
-                    failed += 1
-                }
-            }
+            let result = await fileRemover.removePaths(targets.map { ($0.url, $0.size) })
+            success = result.successCount
+            failed = result.failedCount
+            resultFailures = result.failures
             leftovers.removeAll { selectedLeftoverIDs.contains($0.id) && !FileManager.default.fileExists(atPath: $0.url.path) }
             selectedLeftoverIDs = selectedLeftoverIDs.filter { id in leftovers.contains(where: { $0.id == id }) }
             resultMessage = localized("已移除 \(success) 个项目\(failed > 0 ? "，\(failed) 个失败并已保留" : "")。", "Removed \(success) items\(failed > 0 ? "; \(failed) failed and remain listed" : "").")
@@ -610,6 +626,7 @@ struct UninstallerReplicaView: View {
             var failed = 0
             var failedResiduals = 0
             for app in targets {
+                if Task.isCancelled { break }
                 await appScanner.scanResidualFiles(for: app)
                 let result = await fileRemover.removeApp(app, includeApp: true, moveToTrash: true)
                 appScanner.applyRemovalResult(result, to: app)
@@ -626,6 +643,9 @@ struct UninstallerReplicaView: View {
             if failedResiduals > 0 {
                 resultMessage += localized("\n另有 \(failedResiduals) 个残留项目未能移除。", "\n\(failedResiduals) residual items could not be removed.")
             }
+        }
+        if Task.isCancelled {
+            resultMessage = localized("操作已停止。已处理项目保留记录，其余项目未处理。", "Operation stopped. Completed items remain in history; remaining items were kept.")
         }
         isRemoving = false
         showResult = true
@@ -654,6 +674,9 @@ struct UninstallerReplicaView: View {
             resultMessage = result.failedCount == 0
                 ? localized("残留清理完成，应用已保留。", "Residual cleanup completed. The app was kept.")
                 : localized("有 \(result.failedCount) 个残留项目未能移除，应用已保留。", "\(result.failedCount) residual items could not be removed. The app was kept.")
+        }
+        if Task.isCancelled {
+            resultMessage = localized("操作已停止。已处理项目保留记录，其余项目未处理。", "Operation stopped. Completed items remain in history; remaining items were kept.")
         }
         isRemoving = false
         showResult = true

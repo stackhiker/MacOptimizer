@@ -34,17 +34,29 @@ class ResidualFileScanner {
             let bundleId = app.bundleIdentifier
             
             // 扫描各个位置 - batch process results
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanPreferences(appName: appName, bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanApplicationSupport(appName: appName, bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanCaches(appName: appName, bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanLogs(appName: appName, bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanSavedState(bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanContainers(bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanGroupContainers(bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanCookies(appName: appName, bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanLaunchAgents(appName: appName, bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanCrashReports(appName: appName, bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanDeveloper(appName: appName, bundleId: bundleId))
+            guard !Task.isCancelled else { return [] }
             residualFiles.append(contentsOf: self.scanKnownApplicationData(bundleId: bundleId))
             
             var seenPaths = Set<String>()
@@ -54,6 +66,7 @@ class ResidualFileScanner {
             }
         }) ?? []
         
+        guard !Task.isCancelled else { return [] }
         // Cache the results
         scanCache.set(cacheKey, value: residualFiles, ttl: 300)
         
@@ -86,6 +99,7 @@ class ResidualFileScanner {
             ]
             
             for path in xcodePaths {
+                if Task.isCancelled { break }
                 if fileManager.fileExists(atPath: path.path) {
                     let size = calculateSize(at: path)
                     // Determine type based on path
@@ -185,6 +199,7 @@ class ResidualFileScanner {
         do {
             let contents = try fileManager.contentsOfDirectory(at: groupContainersPath, includingPropertiesForKeys: nil)
             for url in contents {
+                if Task.isCancelled { break }
                 if url.lastPathComponent.contains(bundleId) {
                     let size = calculateSize(at: url)
                     files.append(ResidualFile(path: url, type: .groupContainers, size: size))
@@ -227,6 +242,7 @@ class ResidualFileScanner {
         do {
             let contents = try fileManager.contentsOfDirectory(at: crashLogsPath, includingPropertiesForKeys: nil)
             for url in contents {
+                if Task.isCancelled { break }
                 let fileName = url.lastPathComponent.lowercased()
                 if fileName.contains(appName.lowercased()) {
                     let size = calculateSize(at: url)
@@ -253,6 +269,7 @@ class ResidualFileScanner {
             let batchSize = 100
             for batch in contents.chunked(into: batchSize) {
                 for url in batch {
+                    if Task.isCancelled { break }
                     let fileName = url.lastPathComponent.lowercased()
                     let fileStem = url.deletingPathExtension().lastPathComponent.lowercased()
                     let appNameLower = appName.lowercased()
@@ -325,6 +342,7 @@ class ResidualFileScanner {
     
     // MARK: - 计算大小
     private func calculateSize(at url: URL) -> Int64 {
+        guard !Task.isCancelled else { return 0 }
         var totalSize: Int64 = 0
         
         var isDirectory: ObjCBool = false
@@ -339,6 +357,7 @@ class ResidualFileScanner {
                 )
                 
                 while let fileURL = enumerator?.nextObject() as? URL {
+                    if Task.isCancelled { break }
                     do {
                         let resourceValues = try fileURL.resourceValues(forKeys: Set(keys))
                         totalSize += Int64(

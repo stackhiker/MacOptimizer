@@ -73,6 +73,7 @@ struct TrashBinsReplicaView: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .onAppear {
+            OperationTrackingBridge.shared.attachTrash(scanner)
             selectedCategory = firstPopulatedCategory
         }
         .onReceive(scanner.$isScanning) { scanning in

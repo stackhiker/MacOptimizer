@@ -24,7 +24,7 @@ struct AppUninstallerApp: App {
                     }
                 }
                 .task {
-                    if localization.hasSelectedLanguage {
+                    if localization.hasSelectedLanguage && (UserDefaults.standard.object(forKey: "autoCheckUpdates") as? Bool ?? true) {
                         await UpdateCheckerService.shared.checkForUpdates()
                     }
                 }

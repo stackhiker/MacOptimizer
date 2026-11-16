@@ -2,199 +2,151 @@ import Foundation
 import AppKit
 import UserNotifications
 
-class ProtectionService: ObservableObject {
-    static let shared = ProtectionService()
-    
-    @Published var isMonitoring = false
-    @Published var adBlockedCount: Int {
-        didSet {
-            UserDefaults.standard.set(adBlockedCount, forKey: "AdBlockedCount")
-        }
+protocol DownloadsWatchHandle: AnyObject { func cancel() }
+
+private final class DirectoryDownloadsWatch: DownloadsWatchHandle {
+    private let source: DispatchSourceFileSystemObject
+
+    init(url: URL, changed: @escaping () -> Void) throws {
+        let descriptor = open(url.path, O_EVTONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete],
+                                                           queue: DispatchQueue(label: "com.macoptimizer.download-watch", qos: .utility))
+        source.setEventHandler(handler: changed)
+        // Capture this watcher's descriptor, never a mutable descriptor from the service.
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
     }
-    @Published var threatHistory: [DetectedThreat] = []
-    @Published var blockedAds: [BlockedAd] = []
+    func cancel() { source.cancel() }
+    deinit { source.cancel() }
+}
+
+@MainActor
+final class ProtectionService: ObservableObject {
+    static let shared = ProtectionService()
+    static let monitoringPreferenceKey = "Protection.DownloadNameMonitoringEnabled"
+
+    @Published private(set) var isMonitoring = false
+    @Published private(set) var monitoringError: String?
+    @Published private(set) var threatHistory: [DetectedThreat] = []
+    // No browser content blocker is connected. Never restore simulated counters.
+    @Published private(set) var adBlockedCount = 0
+    @Published private(set) var blockedAds: [BlockedAd] = []
     @Published private(set) var contentBlockerConnected = false
-    
+
     struct BlockedAd: Identifiable {
         let id = UUID()
         let domain: String
         let date: Date
-        let source: String // e.g., "Safari", "Chrome"
+        let source: String
     }
-    
-    private var downloadMonitorSource: DispatchSourceFileSystemObject?
-    private var downloadFileDescriptor: CInt = -1
-    private let malwareScanner = MalwareScanner()
-    
-    // Mock timer for ad block simulation (since we don't have a real Safari Extension connected)
-    private var adSimulationTimer: Timer?
-    
-    private init() {
-        self.adBlockedCount = UserDefaults.standard.integer(forKey: "AdBlockedCount")
-        requestNotificationPermission()
+
+    private let downloadsDirectory: URL
+    private let defaults: UserDefaults
+    private let watchFactory: (URL, @escaping () -> Void) throws -> DownloadsWatchHandle
+    private let scanFile: (URL) -> DetectedThreat?
+    private let notify: (DetectedThreat) -> Void
+    private var watch: DownloadsWatchHandle?
+    private var checkTask: Task<Void, Never>?
+    private var sessionID: UUID?
+    private var reportedVersions: [String: Date] = [:]
+
+    init(downloadsDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads"),
+         defaults: UserDefaults = .standard,
+         watchFactory: @escaping (URL, @escaping () -> Void) throws -> DownloadsWatchHandle = { try DirectoryDownloadsWatch(url: $0, changed: $1) },
+         scanFile: ((URL) -> DetectedThreat?)? = nil,
+         notify: ((DetectedThreat) -> Void)? = nil,
+         resumeSavedPreference: Bool = true) {
+        self.downloadsDirectory = downloadsDirectory
+        self.defaults = defaults
+        self.watchFactory = watchFactory
+        let scanner = MalwareScanner()
+        self.scanFile = scanFile ?? { scanner.scanFile(at: $0) }
+        self.notify = notify ?? Self.sendNotification
+        if resumeSavedPreference && defaults.bool(forKey: Self.monitoringPreferenceKey) {
+            startMonitoring()
+        }
     }
-    
+
+    deinit { checkTask?.cancel(); watch?.cancel() }
+
     func startMonitoring() {
-        print("Starting Protection Service...")
-        isMonitoring = true
-        monitorDownloads()
+        guard watch == nil else { return }
+        let id = UUID()
+        sessionID = id
+        monitoringError = nil
+        do {
+            watch = try watchFactory(downloadsDirectory) { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.sessionID == id, self.isMonitoring else { return }
+                    self.scheduleCheck(session: id)
+                }
+            }
+            isMonitoring = true
+            defaults.set(true, forKey: Self.monitoringPreferenceKey)
+            // Watch future changes; enabling this option does not scan existing downloads.
+        } catch {
+            sessionID = nil
+            isMonitoring = false
+            monitoringError = error.localizedDescription
+            defaults.set(false, forKey: Self.monitoringPreferenceKey)
+        }
     }
-    
+
     func stopMonitoring() {
-        print("Stopping Protection Service...")
+        sessionID = nil
         isMonitoring = false
-        stopDownloadsMonitor()
+        checkTask?.cancel()
+        checkTask = nil
+        watch?.cancel()
+        watch = nil
+        defaults.set(false, forKey: Self.monitoringPreferenceKey)
     }
-    
-    // MARK: - Download Monitoring
-    
-    private func monitorDownloads() {
-        let downloadsPath = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!.path
-        let url = URL(fileURLWithPath: downloadsPath)
-        
-        // Open the directory
-        downloadFileDescriptor = open(downloadsPath, O_EVTONLY)
-        guard downloadFileDescriptor != -1 else {
-            print("Failed to open Downloads folder")
-            return
-        }
-        
-        // Create Dispatch Source
-        downloadMonitorSource = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: downloadFileDescriptor,
-            eventMask: .write,
-            queue: DispatchQueue.global()
-        )
-        
-        downloadMonitorSource?.setEventHandler { [weak self] in
-            // When file is written to Downloads, check for new files
-            // For simplicity in this demo, we just scan "recently added" or do a quick scan of the folder
-            // A better production approach is using FSEvents to get exact file paths.
-            // Here we will just perform a quick check on the latest files in Downloads.
-            self?.checkRecentDownloads(in: url)
-        }
-        
-        downloadMonitorSource?.setCancelHandler { [weak self] in
-            guard let self = self else { return }
-            close(self.downloadFileDescriptor)
-            self.downloadFileDescriptor = -1
-        }
-        
-        downloadMonitorSource?.resume()
-        print("Monitoring Downloads folder at: \(downloadsPath)")
-    }
-    
-    private func stopDownloadsMonitor() {
-        downloadMonitorSource?.cancel()
-        downloadMonitorSource = nil
-    }
-    
-    private func checkRecentDownloads(in folder: URL) {
-        // Find files modified in the last 10 seconds
-        let fileManager = FileManager.default
-        guard let contents = try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { return }
-        
-        let recentFiles = contents.filter { url in
-            guard let date = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate else { return false }
-            return Date().timeIntervalSince(date) < 10 // Changed in last 10s
-        }
-        
-        for file in recentFiles {
-            if let threat = malwareScanner.scanFile(at: file) {
-                // Virus Found!
-                DispatchQueue.main.async {
-                    self.reportThreat(threat)
+
+    private func scheduleCheck(session: UUID) {
+        // Coalesce bursts while a browser writes/renames a download.
+        checkTask?.cancel()
+        let folder = downloadsDirectory
+        let scan = scanFile
+        checkTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+            let worker = Task.detached(priority: .utility) { () -> [(DetectedThreat, Date)] in
+                guard let urls = try? FileManager.default.contentsOfDirectory(at: folder,
+                    includingPropertiesForKeys: [.contentModificationDateKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { return [] }
+                var findings: [(DetectedThreat, Date)] = []
+                for url in urls {
+                    if Task.isCancelled { break }
+                    guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isSymbolicLinkKey]),
+                          values.isSymbolicLink != true, let modified = values.contentModificationDate,
+                          Date().timeIntervalSince(modified) < 60, let threat = scan(url) else { continue }
+                    findings.append((threat, modified))
+                }
+                return findings
+            }
+            let findings = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+            guard !Task.isCancelled, let self, self.sessionID == session, self.isMonitoring else { return }
+            for (threat, modified) in findings {
+                let key = threat.path.path
+                guard self.reportedVersions[key] != modified else { continue }
+                self.reportedVersions[key] = modified
+                if !self.threatHistory.contains(where: { $0.path == threat.path }) {
+                    self.threatHistory.append(threat)
+                    self.notify(threat)
                 }
             }
+            self.checkTask = nil
         }
     }
-    
-    private func reportThreat(_ threat: DetectedThreat) {
-        // 1. Add to history
-        if !threatHistory.contains(where: { $0.path == threat.path }) {
-            threatHistory.append(threat)
-        }
-        
-        // 2. Send Notification
-        let content = UNMutableNotificationContent()
-        content.title = "发现病毒威胁"
-        content.body = "在下载文件夹中检测到: \(threat.name)。请立即处理。"
-        content.sound = .defaultCritical
-        
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
-        
-        // 3. Show Alert if App is active
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "安全警告: 发现病毒"
-        alert.informativeText = "检测到文件 '\(threat.path.lastPathComponent)'包含病毒或恶意软件 (\(threat.name))。\n建议立即将其移除。"
-        alert.alertStyle = .critical
-        alert.addButton(withTitle: "立即删除")
-        alert.addButton(withTitle: "稍后处理")
-        
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            // User chose to delete
-            try? FileManager.default.removeItem(at: threat.path)
-            // Remove from history if deleted
-            threatHistory.removeAll(where: { $0.path == threat.path })
-        }
-    }
-    
-    // MARK: - Ad Block Simulation
-    // In a real app, this would be connected to a Safari Content Blocker Extension
-    private func startAdBlockSimulation() {
-        // Every 30 seconds, if a browser is running, increment ad count
-        adSimulationTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
-            self?.checkBrowserAndBlockAds()
-        }
-    }
-    
-    private func stopAdBlockSimulation() {
-        adSimulationTimer?.invalidate()
-        adSimulationTimer = nil
-    }
-    
-    private func checkBrowserAndBlockAds() {
-        let browserBundleIds = ["com.apple.Safari", "com.google.Chrome", "com.microsoft.edgemac"]
-        let runningApps = NSWorkspace.shared.runningApplications
-        
-        let isBrowserRunning = runningApps.contains { app in
-            guard let id = app.bundleIdentifier else { return false }
-            return browserBundleIds.contains(id)
-        }
-        
-        if isBrowserRunning {
-            // Simulate blocking 1-3 ads
-            let newBlocks = Int.random(in: 1...3)
-            let domains = ["doubleclick.net", "googleadservices.com", "facebook.com/tr", "analytics.twitter.com", "ads.yahoo.com", "trackers.amazon.com"]
-            
-            DispatchQueue.main.async {
-                self.adBlockedCount += newBlocks
-                
-                // Add mock details
-                for _ in 0..<newBlocks {
-                    let randomDomain = domains.randomElement() ?? "ads.example.com"
-                    let source = ["Safari", "Chrome", "Edge"].randomElement() ?? "Browser"
-                    let ad = BlockedAd(domain: randomDomain, date: Date(), source: source)
-                    self.blockedAds.insert(ad, at: 0)
-                    
-                    // Keep list size manageable
-                    if self.blockedAds.count > 100 {
-                        self.blockedAds.removeLast()
-                    }
-                }
-            }
-            print("Simulated blocking \(newBlocks) ads.")
-        }
-    }
-    
-    private func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-            if granted {
-                print("Notification permission granted")
-            }
+
+    private static func sendNotification(_ threat: DetectedThreat) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "下载项目需要检查 / Review a downloaded item"
+            content.body = "\(threat.path.lastPathComponent): \(threat.evidenceSummary)"
+            content.sound = .default
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: threat.id.uuidString, content: content, trigger: nil))
         }
     }
 }

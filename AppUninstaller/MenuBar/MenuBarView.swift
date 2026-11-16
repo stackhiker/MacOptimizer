@@ -131,27 +131,22 @@ struct MenuBarView: View {
                         .font(.system(size: 23))
                         .foregroundColor(protectionService.isMonitoring ? Color.green : Color.orange)
 
-                    Text(loc.text("防护服务提供者：", "Protection provider:"))
+                    Text(loc.text("下载目录名称监控", "Download Name Monitor"))
                         .font(.system(size: 13, weight: .semibold))
-
-                    Image("malware_moonlock_logo_small")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 88, height: 18)
 
                     Spacer(minLength: 6)
 
                     Image(systemName: protectionService.isMonitoring ? "checkmark" : "exclamationmark")
                         .font(.system(size: 11, weight: .bold))
-                    Text(protectionService.isMonitoring ? loc.text("受保护", "Protected") : loc.text("未开启", "Off"))
+                    Text(protectionService.isMonitoring ? loc.text("运行中", "Active") : loc.text("未开启", "Off"))
                         .font(.system(size: 12, weight: .semibold))
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(protectionService.isMonitoring ? loc.text("实时恶意软件监控已开启", "Real-time malware monitoring is on") : loc.text("实时恶意软件监控未开启", "Real-time malware monitoring is off"))
+                    Text(protectionService.isMonitoring ? loc.text("下载目录名称监控已开启", "Download name monitoring is on") : loc.text("下载目录名称监控未开启", "Download name monitoring is off"))
                         .font(.system(size: 13, weight: .semibold))
 
-                    Text(loc.text("安全防护状态会在主应用中持续更新", "Protection status is continuously updated in the main app"))
+                    Text(loc.text("仅提示可疑名称，不确认病毒或自动删除", "Flags suspicious names; no malware confirmation or automatic deletion"))
                         .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.68))
 
