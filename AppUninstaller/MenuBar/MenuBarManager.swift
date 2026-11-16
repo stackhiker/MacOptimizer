@@ -26,69 +26,69 @@ class MenuBarManager: NSObject, ObservableObject {
     @Published var isOpen: Bool = false
     @Published var currentDetailRoute: MenuBarRoute? = nil
     
-    // 标记是否已完成初始化
     private var isSetupComplete = false
+    private var isTerminating = false
     private var isClosing = false
     private var localMouseMonitor: Any?
     private var appResignObserver: NSObjectProtocol?
-    
+
     override init() {
         super.init()
-        // 延迟初始化，确保应用程序完全启动后再创建 status item
-        // 这可以防止在 app 启动时访问 NSStatusBar 导致的崩溃
         DispatchQueue.main.async { [weak self] in
-            self?.performDelayedSetup()
+            self?.ensureSetup()
         }
     }
-    
-    /// 延迟执行的设置，确保 NSApp 已完全初始化
-    private func performDelayedSetup() {
-        guard !isSetupComplete else { return }
-        isSetupComplete = true
-        
-        setupStatusItem()
-        setupWindow()
-        setupAutoClose()
-    }
-    
-    /// 公共方法：确保设置完成（用于需要立即使用的场景）
+
+    /// Startup and reopen both restore the status item without duplicating windows or observers.
     func ensureSetup() {
-        if !isSetupComplete {
-            performDelayedSetup()
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.ensureSetup() }
+            return
         }
-    }
-    
-    private func setupStatusItem() {
-        // 确保在主线程且 NSApp 已准备好
-        guard Thread.isMainThread, NSApp != nil else {
-            print("[MenuBarManager] ⚠️ NSApp not ready, deferring status item setup")
+        guard !isTerminating else { return }
+        guard NSApp != nil else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.setupStatusItem()
+                self?.ensureSetup()
             }
             return
         }
-        
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusItem?.button {
-            // Try to load AppIcon.icns for menu bar
-            if let iconPath = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
-               let customIcon = NSImage(contentsOfFile: iconPath) {
-                customIcon.size = NSSize(width: 18, height: 18)
-                // Use template rendering for proper menu bar appearance
-                customIcon.isTemplate = true
-                button.image = customIcon
-            } else {
-                // Fallback to SF Symbol
-                let fallbackIcon = NSImage(systemSymbolName: "macpro.gen3", accessibilityDescription: "Mac优化大师")
-                fallbackIcon?.isTemplate = true
-                button.image = fallbackIcon
-            }
-            
-            button.action = #selector(toggleWindow)
-            button.target = self
+        guard setupStatusItem() else { return }
+        if popoverWindow == nil {
+            setupWindow()
+        }
+        if !isSetupComplete {
+            setupAutoClose()
+            isSetupComplete = true
         }
     }
-    
+
+    private func setupStatusItem() -> Bool {
+        if statusItem?.button == nil {
+            if let statusItem {
+                NSStatusBar.system.removeStatusItem(statusItem)
+            }
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+            item.autosaveName = "MacOptimizer.MenuBar"
+            statusItem = item
+        }
+        guard let statusItem, let button = statusItem.button else { return false }
+
+        // A dedicated template symbol remains legible at menu bar size.
+        // The full-color app icon has an opaque background when rendered as a template.
+        let icon = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "Mac优化大师")
+        icon?.size = NSSize(width: 18, height: 18)
+        icon?.isTemplate = true
+        button.image = icon
+        button.title = icon == nil ? "优" : ""
+        button.toolTip = "Mac优化大师"
+        button.setAccessibilityLabel("Mac优化大师")
+        button.identifier = NSUserInterfaceItemIdentifier("MacOptimizer.MenuBar")
+        button.action = #selector(toggleWindow)
+        button.target = self
+        statusItem.isVisible = true
+        return true
+    }
+
     private func setupWindow() {
         // Main Overview Window
         // Pass self as EnvironmentObject so Views can call showDetail/closeWindow
@@ -286,6 +286,15 @@ class MenuBarManager: NSObject, ObservableObject {
     }
 
     func removeStatusItem() {
+        isTerminating = true
+        if let localMouseMonitor {
+            NSEvent.removeMonitor(localMouseMonitor)
+            self.localMouseMonitor = nil
+        }
+        if let appResignObserver {
+            NotificationCenter.default.removeObserver(appResignObserver)
+            self.appResignObserver = nil
+        }
         if let windowCloseObserver {
             NotificationCenter.default.removeObserver(windowCloseObserver)
             self.windowCloseObserver = nil
@@ -297,6 +306,7 @@ class MenuBarManager: NSObject, ObservableObject {
     }
     
     func openMainApp(module: AppModule? = nil) {
+        ensureSetup()
         NSApp.setActivationPolicy(.regular)
         if let module {
             AppNavigationController.shared.selectedModule = module
