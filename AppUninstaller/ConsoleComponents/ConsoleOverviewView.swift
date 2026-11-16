@@ -11,6 +11,7 @@ struct ConsoleOverviewView: View {
     @Binding var viewState: MonitorView.DashboardState
     @Binding var processSortMode: ConsoleProcessSortMode
     @ObservedObject var systemMonitor: SystemMonitorService
+    @ObservedObject private var diskManager = DiskSpaceManager.shared
     @ObservedObject private var loc = LocalizationManager.shared
 
     private let accent = Color(red: 0.28, green: 0.82, blue: 0.96)
@@ -20,6 +21,7 @@ struct ConsoleOverviewView: View {
             VStack(alignment: .leading, spacing: 16) {
                 overviewHeader
                 metricStrip
+                diskCapacityCard
 
                 HStack(alignment: .top, spacing: 14) {
                     processRankingCard(
@@ -52,6 +54,16 @@ struct ConsoleOverviewView: View {
             .padding(.horizontal, 22)
             .padding(.top, 20)
             .padding(.bottom, 28)
+        }
+        .task { @MainActor in
+            while !Task.isCancelled {
+                diskManager.updateDiskSpace()
+                do {
+                    try await Task.sleep(nanoseconds: 30_000_000_000)
+                } catch {
+                    break
+                }
+            }
         }
     }
 
@@ -173,6 +185,88 @@ struct ConsoleOverviewView: View {
             )
         }
         .frame(height: 92)
+    }
+
+    private var diskCapacityCard: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 7) {
+                Image(systemName: "internaldrive")
+                    .foregroundColor(accent)
+                Text(loc.text(
+                    simplifiedChinese: "磁盘空间",
+                    traditionalChinese: "磁碟空間",
+                    english: "Disk Space",
+                    japanese: "ディスク容量",
+                    korean: "디스크 공간",
+                    russian: "Место на диске"
+                ))
+                    .foregroundColor(.white.opacity(0.76))
+                Spacer()
+                Text(diskManager.totalSize > 0
+                     ? String(format: "%.0f%%", diskUsage * 100) : "—")
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            .font(.system(size: 12, weight: .medium))
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.08))
+                    Capsule()
+                        .fill(accent.opacity(0.88))
+                        .frame(width: geometry.size.width * diskUsage)
+                }
+            }
+            .frame(height: 5)
+
+            HStack(spacing: 12) {
+                Text(diskCapacityDetail)
+                Spacer(minLength: 0)
+                if diskManager.totalSize > 0 {
+                    Text(loc.text(
+                        simplifiedChinese: "可用 \(diskManager.formattedFree)",
+                        traditionalChinese: "可用 \(diskManager.formattedFree)",
+                        english: "\(diskManager.formattedFree) available",
+                        japanese: "空き \(diskManager.formattedFree)",
+                        korean: "사용 가능 \(diskManager.formattedFree)",
+                        russian: "Доступно \(diskManager.formattedFree)"
+                    ))
+                }
+            }
+            .font(.system(size: 10))
+            .foregroundColor(.white.opacity(0.52))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+        }
+        .padding(14)
+        .consoleCardStyle()
+        .accessibilityElement(children: .combine)
+    }
+
+    private var diskUsage: Double {
+        guard diskManager.totalSize > 0 else { return 0 }
+        return min(max(diskManager.usagePercentage, 0), 1)
+    }
+
+    private var diskCapacityDetail: String {
+        guard diskManager.totalSize > 0 else {
+            return loc.text(
+                simplifiedChinese: "暂时无法读取磁盘容量",
+                traditionalChinese: "暫時無法讀取磁碟容量",
+                english: "Disk capacity is unavailable",
+                japanese: "ディスク容量を取得できません",
+                korean: "디스크 용량을 읽을 수 없습니다",
+                russian: "Объем диска недоступен"
+            )
+        }
+        return loc.text(
+            simplifiedChinese: "已用 \(diskManager.formattedUsed) / 共 \(diskManager.formattedTotal)",
+            traditionalChinese: "已用 \(diskManager.formattedUsed) / 共 \(diskManager.formattedTotal)",
+            english: "\(diskManager.formattedUsed) used / \(diskManager.formattedTotal) total",
+            japanese: "使用済み \(diskManager.formattedUsed) / 合計 \(diskManager.formattedTotal)",
+            korean: "사용 중 \(diskManager.formattedUsed) / 총 \(diskManager.formattedTotal)",
+            russian: "Занято \(diskManager.formattedUsed) / всего \(diskManager.formattedTotal)"
+        )
     }
 
     private func processRankingCard(
